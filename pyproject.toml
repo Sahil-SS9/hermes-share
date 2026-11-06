@@ -1,0 +1,19 @@
+[project]
+name = "hermes-share"
+version = "0.1.0"
+description = "Share a redacted, revocable secret GitHub gist of the current Hermes session"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Sahil-SS9" }]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100

@@ -1,0 +1,11 @@
+name: hermes-share
+version: 0.1.0
+description: "Share the current session as a redacted, revocable secret GitHub gist from /share, and delete it again with /unshare. Disclosure — reads the current session through the same export path /save uses; writes the redacted export and a bounded ledger under the Hermes plugin-data directory; makes exactly two kinds of network call through the gh CLI, `gh gist create` and `gh gist delete`, both only after you confirm; never uploads without /share confirm and never turns redaction off."
+manifest_version: 2
+author: "Sahil-SS9"
+license: MIT
+homepage: https://github.com/Sahil-SS9/hermes-share
+provides_tools: []
+provides_hooks: []
+requires_env: []
+python_dependencies: []
