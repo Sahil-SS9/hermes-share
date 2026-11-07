@@ -139,10 +139,10 @@ HERMES_TEST_HOST_BIN=/path/to/hermes/.venv/bin/hermes \
 PYTHONPATH=/path/to/hermes-agent-checkout .venv/bin/python -m pytest -q
 ```
 
-62 tests against a temporary `HOME`/`HERMES_HOME` and a real `SessionDB`: bundle parsing, sentinel
+65 tests against a temporary `HOME`/`HERMES_HOME` and a real `SessionDB`: bundle parsing, sentinel
 masking, home and identity scrubbing, content detection for all three formats, the confirm gate (no
-child process before it), the `#87988` refusal, the gateway consent gate, ledger bounds, TTLs,
-`/unshare`, and one end-to-end export through the real CLI binary.
+child process before it), the `#87988` refusal, the gateway consent gate, chat-platform sharing,
+ledger bounds, TTLs, `/unshare`, and one end-to-end export through the real CLI binary.
 
 ## Licence
 

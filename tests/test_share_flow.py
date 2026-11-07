@@ -190,3 +190,32 @@ def test_help_lists_every_subcommand(seeded_store):
 def test_output_has_no_ansi(seeded_store, recording_gh, export_double):
     export_double.state[SESSION_A] = export_double.record(SESSION_A, "hi")
     assert "\x1b" not in _share()
+
+
+def test_chat_platform_gets_a_share_preview_and_can_confirm(seeded_store, recording_gh, export_double):
+    """Sharing works on a chat platform; the preview carries counts and titles, never bundle text."""
+    export_double.state[SESSION_A] = export_double.record(SESSION_A, "a very private detail")
+    preview = _share(platform="discord")
+    assert "preview ready, nothing uploaded" in preview
+    assert "sessions   1" in preview
+    assert "a very private detail" not in preview, "the bundle text must never be posted into a chat"
+    assert "secret mark(s)" in preview
+
+    confirmed = _share("confirm", platform="discord")
+    assert "https://gist.github.com/testuser/abc123def456" in confirmed
+    assert "/share import <url>" in confirmed
+
+
+def test_chat_platform_unshare_works(seeded_store, recording_gh, export_double):
+    export_double.state[SESSION_A] = export_double.record(SESSION_A, "hi")
+    _share(platform="telegram")
+    _share("confirm", platform="telegram")
+    assert "404" in _unshare("last")
+
+
+def test_local_and_chat_previews_agree_on_the_counts(seeded_store, recording_gh, export_double):
+    export_double.state[SESSION_A] = export_double.record(SESSION_A, "hi")
+    local = _share(platform="cli")
+    chat = _share(platform="discord", session_id=SESSION_B, session_key=SESSION_B)
+    for token in ("sessions   1", "secret mark(s)", "home path(s)"):
+        assert token in local and token in chat

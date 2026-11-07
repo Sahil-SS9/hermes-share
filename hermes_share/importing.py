@@ -139,6 +139,24 @@ def detect(text: str) -> Optional[str]:
     return None
 
 
+def _codex_message(record: dict[str, Any]) -> bool:
+    """A real Codex rollout carries a message as ``response_item`` -> ``payload.type == "message"``."""
+    payload = record.get("payload")
+    return (str(record.get("type") or "") == "response_item"
+            and isinstance(payload, dict) and payload.get("type") == "message")
+
+
+def _count_turns(text: str, source: str) -> int:
+    """The preview's own turn count, per source shape (the host parser stays the authority)."""
+    records = _records(text)
+    if source == "codex":
+        return sum(1 for record in records
+                   if _codex_message(record) and isinstance(record.get("payload"), dict)
+                   and record["payload"].get("role") in ("user", "assistant"))
+    return sum(1 for record in records
+               if str(record.get("type") or "") in ("user", "assistant"))
+
+
 def _first_user_line(text: str) -> str:
     for record in _records(text):
         if str(record.get("type") or "") != "user":
@@ -171,12 +189,10 @@ def preview(files: list[NamedText]) -> dict[str, Any]:
                 "source": str(record.get("source") or "?"),
             } for record in records]
         else:
-            records = _records(candidate.text)
-            turns = sum(1 for record in records if str(record.get("type") or "") in ("user", "assistant"))
             sessions = [{
                 "id": candidate.name,
                 "title": _first_user_line(candidate.text) or candidate.name,
-                "messages": turns,
+                "messages": _count_turns(candidate.text, source),
                 "source": "Claude Code" if source == "claude" else "Codex CLI",
             }]
         return {"file": candidate, "source": source, "sessions": sessions}

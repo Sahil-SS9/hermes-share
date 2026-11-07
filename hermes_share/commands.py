@@ -381,7 +381,14 @@ def _do_import_confirm(rt: Runtime, *, pending_key: str, platform: str) -> str:
             "NousResearch/hermes-agent#87988.\n"
             "  Nothing was imported. /share cancel clears the pending bundle."
         )
-    hostcli.import_file(source, str(path))
+    try:
+        hostcli.import_file(source, str(path))
+    except hostcli.HostCliError as exc:
+        return (
+            f"Import failed: {exc}\n"
+            "  The downloaded file is still pending; /share import confirm retries it, "
+            "/share cancel discards it."
+        )
     store.clear_pending(root, f"{pending_key}:import")
     sessions = pending.get("sessions") or []
     lines = [f"Imported {len(sessions)} session(s) into this Hermes from {source}:"]
