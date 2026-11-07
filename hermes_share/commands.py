@@ -1,29 +1,30 @@
 """The ``/share`` and ``/unshare`` slash commands.
 
-Both handlers take ``raw_args`` plus whichever session-context keywords the host passes (``source``,
-``session_id``, ``session_key``, ``platform``). Everything host-specific arrives through a
-:class:`Runtime` bound at registration time, so this module imports no Hermes internals: redaction is
-``ctx.redact_text``, exports and imports are the public CLI, storage is the plugin-data directory.
+Handlers take ``raw_args`` plus the session keywords the host passes (``session_id``,
+``session_key``, ``platform``). The host object reaches them through :class:`Runtime`, bound once at
+registration, so this module imports no Hermes internals.
 """
 
 from __future__ import annotations
 
 import datetime as _dt
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
-from . import PLUGIN_NAME
-from . import bundle as bundle_mod
-from . import gists
-from . import hostcli
-from . import importing
-from . import store
-from .paths import StateRootUnavailable, data_dir, imports_dir
+from . import PLUGIN_NAME, bundle, gists, hostcli, importing, store
 
-#: Surfaces where the whole preview can be read on the same screen that confirms it.
+#: Surfaces where the whole preview is read on the screen that confirms it.
 LOCAL_SURFACES = frozenset({"local", "cli", "tui", "desktop", "acp", ""})
 #: Setting that lets a chat platform import a bundle into this profile's store.
 GATEWAY_IMPORT_SETTING = "allow_gateway_import"
+FORMATS = {
+    "jsonl": {"jsonl"},
+    "md": {"md"},
+    "html": {"html"},
+    "both": {"jsonl", "md"},
+    "all": {"jsonl", "md", "html"},
+}
 
 USAGE = """\
 /share -- share sessions as a redacted, revocable secret gist, and import them back
@@ -42,10 +43,15 @@ USAGE = """\
 Redaction is always on and cannot be switched off: credentials become non-reusable sentinels, home
 paths become ~, and your account and host names are replaced. Nothing is uploaded without `confirm`.
 """
+NEEDS_87988 = (
+    "this Hermes cannot import a Hermes export yet: `hermes sessions import --from` offers "
+    "only claude and codex.\n  It needs session import from Hermes exports, "
+    "NousResearch/hermes-agent#87988."
+)
 
 
-class RedactUnavailable(RuntimeError):
-    """The host does not expose ``ctx.redact_text``; sharing would upload raw text."""
+class Refused(RuntimeError):
+    """A command cannot go ahead; the message is the whole reply."""
 
 
 class Runtime:
@@ -54,507 +60,317 @@ class Runtime:
     def __init__(self, ctx: Any) -> None:
         self.ctx = ctx
 
-    def redactor(self) -> bundle_mod.Redactor:
+    def redactor(self) -> Callable[[str], str]:
         method = getattr(self.ctx, "redact_text", None)
         if not callable(method):
-            raise RedactUnavailable(
-                "this Hermes does not expose ctx.redact_text(), and without it there is no way to "
-                "scrub a bundle except by importing an internal module, which this plugin does "
-                "not do. Nothing was written or uploaded.\n"
+            raise Refused(
+                "Cannot share: this Hermes has no ctx.redact_text(), the only way this plugin "
+                "scrubs a bundle. Nothing was written or uploaded.\n"
                 "  Update Hermes to a version that includes ctx.redact_text()."
             )
-
-        def _redact(text: str) -> str:
-            return method(text, force=True)
-
-        return _redact
+        return lambda text: method(text, force=True)
 
     def setting(self, name: str, default: Any = None) -> Any:
-        getter = getattr(self.ctx, "get_config", None)
-        if not callable(getter):
-            return default
         try:
-            return getter(name, default)
+            return self.ctx.get_config(name, default)
         except Exception:
             return default
 
 
-def _now_utc() -> str:
-    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+def _now() -> str:
+    return _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _bytes(count: int) -> str:
-    if count < 1024:
-        return f"{count} B"
-    if count < 1024 * 1024:
-        return f"{count / 1024:.1f} KB"
-    return f"{count / (1024 * 1024):.1f} MB"
+def _size(paths: list[Path]) -> str:
+    n = sum(p.stat().st_size for p in paths if p.is_file())
+    return f"{n} B" if n < 1024 else f"{n / 1024:.1f} KB" if n < 2**20 else f"{n / 2**20:.1f} MB"
 
 
-def is_local(platform: str) -> bool:
-    return platform in LOCAL_SURFACES
+def _formats(token: str) -> frozenset[str]:
+    kinds = set().union(*(FORMATS.get(part.strip(), {part.strip()}) for part in token.lower().split(",")))
+    if not kinds or kinds - FORMATS["all"]:
+        raise Refused(f"unknown format {token!r}: use md, html, jsonl, both, all, or a comma-separated list")
+    return frozenset(kinds)
 
 
-def _pending_key(session_key: str, session_id: str) -> str:
-    return session_key or session_id or ""
+def _parse(raw: str) -> dict[str, Any]:
+    """``[selector ...] [--last N] [--format K]`` or a subcommand and its rest."""
+    tokens = raw.split()
+    parsed: dict[str, Any] = {"sub": "", "rest": "", "selectors": [], "last": 0, "formats": FORMATS["all"]}
+    while tokens:
+        token = tokens.pop(0)
+        flag, _, value = token.partition("=")
+        if flag in ("--last", "--format"):
+            value = value or (tokens.pop(0) if tokens else "")
+            if flag == "--format":
+                parsed["formats"] = _formats(value)
+            elif value.isdigit() and int(value) > 0:
+                parsed["last"] = int(value)
+            else:
+                raise Refused(f"--last needs a positive number, got {value!r}")
+        elif not parsed["selectors"] and token in ("confirm", "cancel", "list", "help", "import"):
+            return {**parsed, "sub": token, "rest": " ".join(tokens)}
+        else:
+            parsed["selectors"].append(token)
+    return parsed
 
 
 # ---------------------------------------------------------------- sharing
 
-def _check_format(token: str) -> frozenset[str]:
-    """``md``, ``html``, ``jsonl``, ``both`` (jsonl+md), ``all``, or a comma-separated list."""
-    raw = (token or "").strip().lower()
-    if raw in ("both",):
-        return frozenset({"jsonl", "md"})
-    if raw in ("all", ""):
-        return frozenset({"jsonl", "md", "html"})
-    kinds = {part.strip() for part in raw.split(",") if part.strip()}
-    unknown = kinds - {"md", "html", "jsonl"}
-    if unknown or not kinds:
-        raise ValueError(
-            f"unknown format {token!r} - use md, html, jsonl, both, all, or a comma-separated list"
-        )
-    return frozenset(kinds)
 
-
-def _parse_share_args(raw: str) -> dict[str, Any]:
-    tokens = (raw or "").split()
-    parsed: dict[str, Any] = {"sub": "", "selectors": [], "last": 0,
-                              "format": _check_format("all"), "rest": ""}
-    index = 0
-    while index < len(tokens):
-        token = tokens[index]
-        if token == "--last" and index + 1 < len(tokens):
-            try:
-                parsed["last"] = max(1, int(tokens[index + 1]))
-            except ValueError:
-                raise ValueError(f"--last needs a number, got {tokens[index + 1]!r}")
-            index += 2
-            continue
-        if token.startswith("--last="):
-            try:
-                parsed["last"] = max(1, int(token.split("=", 1)[1]))
-            except ValueError:
-                raise ValueError(f"--last needs a number, got {token!r}")
-            index += 1
-            continue
-        if token == "--format" and index + 1 < len(tokens):
-            parsed["format"] = _check_format(tokens[index + 1])
-            index += 2
-            continue
-        if token.startswith("--format="):
-            parsed["format"] = _check_format(token.split("=", 1)[1])
-            index += 1
-            continue
-        if not parsed["sub"] and token in ("confirm", "cancel", "list", "help", "import"):
-            parsed["sub"] = token
-            parsed["rest"] = " ".join(tokens[index + 1:])
-            return parsed
-        parsed["selectors"].append(token)
-        index += 1
-    return parsed
-
-
-def _safe_id(session_id: str) -> str:
-    return "".join(ch for ch in str(session_id) if ch.isalnum() or ch in ("-", "_")) or "session"
-
-
-def _format_label(value: Any) -> str:
-    """A ledger-safe one-word description of the kinds in a bundle."""
-    if isinstance(value, (list, tuple, set, frozenset)):
-        return ",".join(str(item) for item in sorted(value))
-    return str(value or "")
-
-
-def _bundle_files(root: Path, bundle: dict[str, Any], formats: frozenset[str]) -> list[Path]:
-    stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    directory = root / "previews"
-    directory.mkdir(parents=True, exist_ok=True)
-    paths: list[Path] = []
-    if "jsonl" in formats:
-        path = directory / f"hermes-sessions-{stamp}.jsonl"
-        path.write_text(bundle["jsonl"], encoding="utf-8")
-        paths.append(path)
-    if "md" in formats:
-        path = directory / f"hermes-sessions-{stamp}.md"
-        path.write_text(bundle["markdown"], encoding="utf-8")
-        paths.append(path)
-    for path in paths:
-        try:
-            path.chmod(0o600)
-        except OSError:
-            pass
-    return paths
-
-
-def _html_paths(root: Path, session_ids: list[str], formats: frozenset[str]) -> dict[str, Path]:
-    """One document per session: the CLI renders a single session per HTML file."""
-    if "html" not in formats:
-        return {}
-    stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    directory = root / "previews"
-    directory.mkdir(parents=True, exist_ok=True)
-    return {sid: directory / f"hermes-session-{_safe_id(sid)}-{stamp}.html" for sid in session_ids}
-
-
-def _preview_text(bundle: dict[str, Any], paths: list[Path], description: str,
-                  warning: str) -> str:
-    totals = bundle["totals"]
-    total_bytes = sum(path.stat().st_size for path in paths if path.is_file())
-    lines = ["/share - preview ready, nothing uploaded", "", f"  sessions   {len(bundle['sessions'])}"]
-    lines.extend(bundle_mod.summary_lines(bundle))
-    lines += [
+def _share_preview(rt: Runtime, key: str, session_id: str, parsed: dict[str, Any]) -> str:
+    redact = rt.redactor()
+    ids = (
+        hostcli.session_ids(parsed["selectors"], parsed["last"])
+        if parsed["selectors"] or parsed["last"]
+        else [session_id]
+    )
+    if not ids or not ids[0]:
+        raise Refused("No session is bound to this command, so there is nothing to share.")
+    previews = store.data_dir("previews")
+    built = bundle.build(
+        ids, redact, previews, f"hermes-sessions-{_dt.datetime.now():%Y%m%d-%H%M%S}", parsed["formats"]
+    )
+    store.trim(previews, keep=store.MAX_FILES_PER_DIR + len(built["files"]))
+    sessions, totals, files = built["sessions"], built["totals"], built["files"]
+    titles = ", ".join(s["title"] for s in sessions[:2]) + (", ..." if len(sessions) > 2 else "")
+    description = " ".join(built["scrub"].text(f"Hermes sessions: {titles} ({len(sessions)})").split())[:200]
+    store.save_pending(
+        key,
+        {
+            "kind": "share",
+            "paths": [str(p) for p in files],
+            "description": description,
+            "formats": sorted(parsed["formats"]),
+            "sessions": sessions,
+        },
+    )
+    lines = [
+        "/share - preview ready, nothing uploaded",
         "",
-        (f"  redacted   {totals['secrets']} secret mark(s), {totals['paths']} home path(s), "
-         f"{totals['identities']} account/host name(s)"),
-        f"  files      {', '.join(path.name for path in paths)} ({_bytes(total_bytes)} total)",
+        f"  sessions   {len(sessions)}",
+        *bundle.summary_lines(sessions),
+        "",
+        f"  redacted   {totals['secrets']} secret mark(s), {totals['paths']} home path(s), "
+        f"{totals['identities']} account/host name(s)",
+        f"  files      {', '.join(p.name for p in files)} ({_size(files)} total)",
         f"  gist desc  {description}",
         "",
         "Next: /share confirm   uploads it as a SECRET gist (unlisted, not private)",
         "      /share cancel    deletes the preview and forgets it",
     ]
-    if warning:
-        lines += ["", f"  ! {warning}"]
-    return "\n".join(lines)
-
-
-def _resolve_ids(selectors: list[str], last: int, current: str) -> list[str]:
-    if last:
-        with hostcli.open_session_index() as db:
-            ids = hostcli.recent_session_ids(db, last)
-        if not ids:
-            raise bundle_mod.BundleError("no sessions found to share")
-        return ids
-    if not selectors:
-        if not current:
-            raise bundle_mod.BundleError(
-                "no session is bound to this command, so there is nothing to share"
-            )
-        return [current]
-    resolved: list[str] = []
-    missing: list[str] = []
-    with hostcli.open_session_index() as db:
-        for selector in selectors:
-            found = hostcli.resolve_selector(db, selector)
-            if found:
-                if found not in resolved:
-                    resolved.append(found)
-            else:
-                missing.append(selector)
-    if missing:
-        raise bundle_mod.BundleError(
-            "no single session matches " + ", ".join(repr(item) for item in missing)
-            + " (pass an id, an unambiguous id prefix, or a distinctive title fragment)"
-        )
-    return resolved
-
-
-def _do_preview(rt: Runtime, *, session_id: str, pending_key: str, parsed: dict[str, Any]) -> str:
-    redact = rt.redactor()
-    ids = _resolve_ids(parsed["selectors"], parsed["last"], session_id)
-    root = data_dir()
-    formats = parsed["format"]
-    built = bundle_mod.build(ids, redact, formats=formats, html_paths=_html_paths(root, ids, formats))
-    paths = _bundle_files(root, built, formats)
-    paths += [doc["path"] for doc in built["html"]]
-    store.trim_previews(root)
-
-    titles = ", ".join(item["title"] for item in built["sessions"][:2])
-    if len(built["sessions"]) > 2:
-        titles += ", ..."
-    description, _counts = bundle_mod.redact_text(
-        f"Hermes sessions: {titles} ({len(built['sessions'])})", redact, bundle_mod.identity_tokens()
-    )
-    description = " ".join(description.split())[:200]
     warning = gists.missing_gh_hint()
-    store.save_pending(
-        root,
-        pending_key,
-        {
-            "kind": "share",
-            "paths": [str(path) for path in paths],
-            "format": sorted(formats),
-            "description": description,
-            "sessions": built["sessions"],
-        },
-    )
-    return _preview_text(built, paths, description, warning)
+    return "\n".join(lines + (["", f"  ! {warning}"] if warning else []))
 
 
-def _do_confirm(rt: Runtime, *, pending_key: str, platform: str) -> str:
-    root = data_dir()
-    pending = store.load_pending(root, pending_key)
-    if not pending or pending.get("kind") != "share":
-        return (
-            "There is no pending preview for this session.\n"
-            "  Run /share to write one first. Previews expire after 15 minutes."
-        )
-    paths = [Path(str(item)) for item in pending.get("paths") or []]
-    missing = [path.name for path in paths if not path.is_file()]
-    if missing or not paths:
-        store.clear_pending(root, pending_key)
-        return (
-            "The preview file is gone (" + (", ".join(missing) or "none recorded") + "), so nothing "
-            "was uploaded.\n  Run /share again to write a fresh one."
-        )
+def _share_confirm(rt: Runtime, key: str, platform: str) -> str:
+    pending = store.load_pending(key, "share")
+    if not pending:
+        return "There is no pending preview for this session.\n  Run /share first; previews last 15 minutes."
+    paths = [Path(p) for p in pending["paths"]]
+    if not paths or not all(p.is_file() for p in paths):
+        store.clear_pending(key)
+        return "The preview files are gone, so nothing was uploaded.\n  Run /share again."
     redact = rt.redactor()
-    problem = gists.auth_problem(redact=redact)
-    if problem:
-        return problem
-
-    result = gists.create_secret_gist(
-        str(pending.get("description") or "Hermes sessions"), [str(path) for path in paths],
-        redact=redact,
+    gists.require_auth(redact)
+    url, gist_id = gists.create_secret_gist(pending["description"], [str(p) for p in paths], redact)
+    store.add_share(
+        {
+            "gist_id": gist_id,
+            "url": url,
+            "sessions": pending["sessions"],
+            "files": [p.name for p in paths],
+            "format": ",".join(pending["formats"]),
+            "created": _now(),
+            "status": "shared",
+        }
     )
-    row = {
-        "gist_id": result["gist_id"],
-        "url": result["url"],
-        "sessions": pending.get("sessions") or [],
-        "files": [path.name for path in paths],
-        "format": _format_label(pending.get("format")),
-        "created": _now_utc(),
-        "status": "shared",
-    }
-    store.append_share(root, row)
-    store.clear_pending(root, pending_key)
-    total = sum(path.stat().st_size for path in paths)
-    lines = [
-        "Shared as a secret gist:",
-        f"  {result['url']}",
-        "",
-        f"  {len(paths)} file(s), {_bytes(total)}: {', '.join(path.name for path in paths)}",
-        f"  sessions: {len(row['sessions'])}",
-        "  Secret means unlisted and searchable only by URL - it is not access-controlled.",
-        "",
-        "Import it in another Hermes with: /share import <url>",
-    ]
-    if is_local(platform):
-        lines.append("Revoke with:                     /unshare last")
-    return "\n".join(lines)
+    store.clear_pending(key)
+    return "\n".join(
+        [
+            "Shared as a secret gist:",
+            f"  {url}",
+            "",
+            f"  {len(paths)} file(s), {_size(paths)}: {', '.join(p.name for p in paths)}",
+            f"  sessions: {len(pending['sessions'])}",
+            "  Secret means unlisted and readable by anyone with the URL - it is not access-controlled.",
+            "",
+            "Import it in another Hermes with: /share import <url>",
+            *(["Revoke with:                     /unshare last"] if platform in LOCAL_SURFACES else []),
+        ]
+    )
 
 
 # ---------------------------------------------------------------- import
 
-def _gateway_import_allowed(rt: Runtime, platform: str) -> Optional[str]:
-    if is_local(platform):
-        return None
-    if rt.setting(GATEWAY_IMPORT_SETTING, False) is True:
-        return None
-    return (
-        f"/share import is refused on {platform or 'this platform'}: an import writes sessions into "
-        "this Hermes's own store, so it needs explicit owner consent.\n"
-        f"  Set plugins.entries.{PLUGIN_NAME}.settings.{GATEWAY_IMPORT_SETTING}: true to allow it. "
-        "Sharing and /unshare work here without that setting."
+
+def _import_allowed(rt: Runtime, platform: str) -> None:
+    if platform not in LOCAL_SURFACES and rt.setting(GATEWAY_IMPORT_SETTING, False) is not True:
+        raise Refused(
+            f"/share import is refused on {platform}: an import writes sessions into this Hermes's own "
+            f"store, so it needs the owner's consent.\n  Set plugins.entries.{PLUGIN_NAME}.settings."
+            f"{GATEWAY_IMPORT_SETTING}: true to allow it. Sharing and /unshare work here without it."
+        )
+
+
+def _import_preview(rt: Runtime, key: str, target: str, platform: str) -> str:
+    _import_allowed(rt, platform)
+    found = importing.preview(importing.fetch(target))
+    directory = store.data_dir("imports")
+    path = directory / (
+        "".join(c if c.isalnum() or c in "._-" else "_" for c in Path(found["name"]).name) or "bundle.jsonl"
     )
-
-
-def _do_import_preview(rt: Runtime, *, target: str, pending_key: str, platform: str) -> str:
-    refusal = _gateway_import_allowed(rt, platform)
-    if refusal:
-        return refusal
-    files = importing.fetch(target)
-    found = importing.preview(files)
-    path = importing.write_import_file(found["file"].name, found["file"].text, imports_dir())
-    root = data_dir()
-    store.trim_imports(root)
+    path.write_text(found["text"], encoding="utf-8")
+    store.trim(directory)
     store.save_pending(
-        root,
-        f"{pending_key}:import",
-        {"kind": "import", "path": str(path), "source": found["source"],
-         "sessions": found["sessions"], "target": target},
+        f"{key}:import",
+        {"kind": "import", "path": str(path), "source": found["source"], "sessions": found["sessions"]},
     )
-    label = {"hermes": "Hermes export", "claude": "Claude Code", "codex": "Codex CLI"}[found["source"]]
-    lines = [
-        "/share import - preview, nothing imported yet",
-        "",
-        f"  source     {label}",
-        f"  file       {found['file'].name}",
-        f"  sessions   {len(found['sessions'])}",
-    ]
-    for item in found["sessions"]:
-        lines.append(
-            f"  {str(item['id'])[:24]:<24}  {item['messages']:>4} msg  {str(item['title'])[:60]}"
-        )
-    if found["source"] == "hermes" and not hostcli.import_help_offers_hermes():
-        lines += [
+    blocked = found["source"] == "hermes" and not hostcli.import_offers_hermes()
+    return "\n".join(
+        [
+            "/share import - preview, nothing imported yet",
             "",
-            "  ! this Hermes cannot import a Hermes export yet: `hermes sessions import --from`",
-            "    offers only claude and codex. It needs a Hermes that includes session import from",
-            "    Hermes exports, NousResearch/hermes-agent#87988. Confirming will refuse.",
+            f"  source     {importing.LABELS[found['source']]}",
+            f"  file       {path.name}",
+            f"  sessions   {len(found['sessions'])}",
+            *bundle.summary_lines(found["sessions"], secrets=False),
+            *(["", f"  ! {NEEDS_87988} Confirming will refuse."] if blocked else []),
+            "",
+            "Next: /share import confirm   imports it into this Hermes",
+            "      /share cancel            forgets it",
         ]
-    lines += [
-        "",
-        "Next: /share import confirm   imports it into this Hermes",
-        "      /share cancel            forgets it",
-    ]
-    return "\n".join(lines)
+    )
 
 
-def _do_import_confirm(rt: Runtime, *, pending_key: str, platform: str) -> str:
-    refusal = _gateway_import_allowed(rt, platform)
-    if refusal:
-        return refusal
-    root = data_dir()
-    pending = store.load_pending(root, f"{pending_key}:import")
-    if not pending or pending.get("kind") != "import":
-        return (
-            "There is no pending import for this session.\n"
-            "  Run /share import <gist-url-or-file> first."
-        )
-    source = str(pending.get("source") or "")
-    path = Path(str(pending.get("path") or ""))
+def _import_confirm(rt: Runtime, key: str, platform: str) -> str:
+    _import_allowed(rt, platform)
+    pending = store.load_pending(f"{key}:import", "import")
+    if not pending:
+        return "There is no pending import for this session.\n  Run /share import <gist-url-or-file> first."
+    path, source = Path(pending["path"]), pending["source"]
     if not path.is_file():
-        store.clear_pending(root, f"{pending_key}:import")
+        store.clear_pending(f"{key}:import")
         return "The downloaded file is gone, so nothing was imported.\n  Run /share import again."
-    if source == "hermes" and not hostcli.import_help_offers_hermes():
-        return (
-            "This Hermes cannot import a Hermes export: `hermes sessions import --from` offers only "
-            "claude and codex.\n"
-            "  It needs a Hermes that includes session import from Hermes exports, "
-            "NousResearch/hermes-agent#87988.\n"
-            "  Nothing was imported. /share cancel clears the pending bundle."
-        )
+    if source == "hermes" and not hostcli.import_offers_hermes():
+        return f"Nothing was imported: {NEEDS_87988}\n  /share cancel clears the pending bundle."
     try:
-        hostcli.import_file(source, str(path))
+        hostcli.import_file(source, path)
     except hostcli.HostCliError as exc:
-        return (
-            f"Import failed: {exc}\n"
-            "  The downloaded file is still pending; /share import confirm retries it, "
-            "/share cancel discards it."
-        )
-    store.clear_pending(root, f"{pending_key}:import")
-    sessions = pending.get("sessions") or []
-    lines = [f"Imported {len(sessions)} session(s) into this Hermes from {source}:"]
-    for item in sessions:
-        lines.append(f"  {str(item['id'])[:24]:<24}  {str(item['title'])[:60]}")
-    lines += ["", "Continue one with:  hermes --resume <session-id>"]
-    return "\n".join(lines)
+        return f"Import failed: {exc}\n  Still pending: /share import confirm retries; /share cancel drops."
+    store.clear_pending(f"{key}:import")
+    return "\n".join(
+        [
+            f"Imported {len(pending['sessions'])} session(s) into this Hermes from "
+            f"{importing.LABELS[source]}:",
+            *(f"  {str(s['id'])[:24]:<24}  {str(s['title'])[:60]}" for s in pending["sessions"]),
+            "",
+            "Continue one with:  hermes --resume <session-id>",
+        ]
+    )
 
 
-# ---------------------------------------------------------------- list / unshare
+# ---------------------------------------------------------------- list / cancel / unshare
 
-def _do_list() -> str:
-    root = data_dir()
-    rows = store.load_ledger(root)["shares"]
+
+def _list() -> str:
+    rows = store.shares()
     if not rows:
         return "No gists have been shared from this profile yet."
     out = [f"Shared gists for this profile ({len(rows)}):", ""]
-    for row in rows:
-        status = "revoked" if row.get("status") == "revoked" else "shared "
-        sessions = row.get("sessions") or []
-        out.append(
-            f"  {status}  {row.get('created', '?')}  {len(sessions):>2} session(s)  "
-            f"{row.get('gist_id', '?')}"
-        )
-        out.append(f"            {row.get('url', '')}")
-    out += ["", "Delete one with: /unshare <gist-id>   or   /unshare last"]
-    return "\n".join(out)
+    for r in rows:
+        out += [
+            f"  {r.get('status', 'shared'):<7}  {r.get('created', '?')}  "
+            f"{len(r.get('sessions') or []):>2} session(s)  {r.get('gist_id', '?')}",
+            f"            {r.get('url', '')}",
+        ]
+    return "\n".join(out + ["", "Delete one with: /unshare <gist-id>   or   /unshare last"])
 
 
-def _do_cancel(pending_key: str) -> str:
-    root = data_dir()
+def _cancel(key: str) -> str:
     removed = 0
-    for suffix in ("", ":import"):
-        pending = store.load_pending(root, f"{pending_key}{suffix}")
-        if not pending:
-            continue
-        for item in list(pending.get("paths") or []) + [pending.get("path")]:
-            if item:
-                try:
-                    Path(str(item)).unlink()
-                except OSError:
-                    pass
-        store.clear_pending(root, f"{pending_key}{suffix}")
-        removed += 1
-    return "Preview deleted; nothing was uploaded." if removed else "No pending preview to cancel."
+    for pending_key, kind in ((key, "share"), (f"{key}:import", "import")):
+        pending = store.load_pending(pending_key, kind)
+        if pending:
+            for item in pending.get("paths") or [pending.get("path")]:
+                Path(item).unlink(missing_ok=True)
+            store.clear_pending(pending_key)
+            removed += 1
+    return (
+        "Preview deleted; nothing was uploaded or imported." if removed else "No pending preview to cancel."
+    )
 
 
-def _do_unshare(target: str) -> str:
-    root = data_dir()
+def _unshare(target: str) -> str:
+    rows = store.shares()
     if target in ("", "last"):
-        row = store.latest_live_share(root)
+        row = next((r for r in rows if r.get("status") == "shared"), None)
         if row is None:
             return "No live shared gist to revoke. /share list shows what has been shared."
     else:
-        gist_id = gists.gist_id_from_url(target) if target.startswith("http") else target.strip()
-        row = store.find_share(root, gist_id)
+        gist_id = gists.gist_id_from_url(target) or target
+        row = next((r for r in rows if r.get("gist_id") == gist_id), None)
         if row is None:
-            return (
-                f"{gist_id} is not in this profile's ledger, so nothing was deleted.\n"
-                "  /share list shows the ids this plugin created."
-            )
+            return f"{gist_id} is not in this profile's ledger; nothing was deleted (see /share list)."
         if row.get("status") == "revoked":
-            return f"{gist_id} is already marked revoked; nothing to do."
-    problem = gists.auth_problem()
-    if problem:
-        return problem
-    gist_id = str(row.get("gist_id") or "")
-    gists.delete_gist(gist_id)
-    store.update_share(root, gist_id, status="revoked", revoked=_now_utc())
-    return f"Deleted gist {gist_id}. The URL now returns 404.\n  Revoked at {_now_utc()}"
+            return f"{gist_id} is already revoked; nothing to do."
+    gists.require_auth()
+    gists.delete_gist(row["gist_id"])
+    store.mark_revoked(row["gist_id"], _now())
+    return f"Deleted gist {row['gist_id']}. The URL now returns 404."
 
 
 # ---------------------------------------------------------------- entry points
 
-def handle_share(raw_args: str = "", *, rt: Runtime, session_id: str = "", session_key: str = "",
-                 platform: str = "", source: Any = None, **_kwargs: Any) -> str:
-    """``/share`` -- preview, then confirm."""
+
+def _guard(run: Callable[[], str], name: str) -> str:
+    """Every failure becomes a reply; a traceback never reaches the user."""
     try:
-        parsed = _parse_share_args(raw_args)
-    except ValueError as exc:
-        return f"{exc}\n\n{USAGE}"
-    sub = parsed["sub"]
-    pending_key = _pending_key(session_key, session_id)
-    try:
-        if sub == "help":
-            return USAGE
-        if sub == "list":
-            return _do_list()
-        if sub == "confirm":
-            return _do_confirm(rt, pending_key=pending_key, platform=platform)
-        if sub == "cancel":
-            return _do_cancel(pending_key)
-        if sub == "import":
-            target = parsed["rest"].strip()
-            if target == "confirm":
-                return _do_import_confirm(rt, pending_key=pending_key, platform=platform)
-            if not target:
-                return "Usage: /share import <gist-url-or-file>   (then /share import confirm)"
-            return _do_import_preview(rt, target=target, pending_key=pending_key, platform=platform)
-        return _do_preview(rt, session_id=session_id, pending_key=pending_key, parsed=parsed)
-    except RedactUnavailable as exc:
-        return f"Cannot share: {exc}"
-    except bundle_mod.BundleError as exc:
+        return run()
+    except Refused as exc:
+        return str(exc)
+    except (bundle.BundleError, hostcli.HostCliError) as exc:
         return f"Cannot build the bundle: {exc}. Nothing was written or uploaded."
-    except hostcli.HostCliError as exc:
-        return f"Cannot read the session: {exc}. Nothing was uploaded."
-    except importing.ImportError_ as exc:
-        return f"Cannot import: {exc}"
-    except gists.GistError as exc:
-        return f"{exc}"
-    except StateRootUnavailable as exc:
-        return f"Cannot use the plugin-data directory: {exc}. Nothing was written or uploaded."
-    except Exception as exc:  # never let a handler traceback reach the terminal uncaught
-        return f"/share failed ({type(exc).__name__}: {exc}). Nothing was uploaded."
-
-
-def handle_unshare(raw_args: str = "", *, rt: Runtime, session_id: str = "", session_key: str = "",
-                   platform: str = "", source: Any = None, **_kwargs: Any) -> str:
-    """``/unshare [gist-id|last]`` -- delete a shared gist."""
-    tokens = (raw_args or "").split()
-    try:
-        if tokens and tokens[0].lower() in ("help", "-h", "--help", "?"):
-            return USAGE
-        if len(tokens) > 1:
-            return USAGE
-        return _do_unshare(tokens[0] if tokens else "")
-    except gists.GistError as exc:
-        return f"{exc}"
-    except StateRootUnavailable as exc:
-        return f"Cannot revoke: {exc}."
+    except (importing.ImportFailed, gists.GistError, store.StateRootUnavailable) as exc:
+        return f"/{name}: {exc}"
     except Exception as exc:
-        return f"/unshare failed ({type(exc).__name__}: {exc}). Nothing was changed."
+        return f"/{name} failed ({type(exc).__name__}: {exc}). Nothing was uploaded or changed."
 
 
-__all__ = ["handle_share", "handle_unshare", "Runtime", "USAGE", "GATEWAY_IMPORT_SETTING",
-           "PLUGIN_NAME"]
+def handle_share(
+    raw_args: str = "",
+    *,
+    rt: Runtime,
+    session_id: str = "",
+    session_key: str = "",
+    platform: str = "",
+    **_kwargs: Any,
+) -> str:
+    key = session_key or session_id or ""
+
+    def run() -> str:
+        parsed = _parse(raw_args or "")
+        sub, rest = parsed["sub"], parsed["rest"].strip()
+        if sub == "import":
+            if rest == "confirm":
+                return _import_confirm(rt, key, platform)
+            return (
+                _import_preview(rt, key, rest, platform)
+                if rest
+                else "Usage: /share import <gist-url-or-file>   (then /share import confirm)"
+            )
+        return {
+            "help": lambda: USAGE,
+            "list": _list,
+            "cancel": lambda: _cancel(key),
+            "confirm": lambda: _share_confirm(rt, key, platform),
+        }.get(sub, lambda: _share_preview(rt, key, session_id, parsed))()
+
+    return _guard(run, "share")
+
+
+def handle_unshare(raw_args: str = "", **_kwargs: Any) -> str:
+    tokens = (raw_args or "").split()
+    if len(tokens) > 1 or tokens[:1] in (["help"], ["-h"], ["--help"]):
+        return USAGE
+    return _guard(lambda: _unshare(tokens[0] if tokens else ""), "unshare")

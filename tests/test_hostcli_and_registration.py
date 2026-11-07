@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -21,7 +20,12 @@ def _completed(returncode=0, stdout="", stderr=""):
 def test_child_env_is_an_allowlist(fake_home, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-should-not-leak")
     monkeypatch.setenv("PYTHONPATH", "/somewhere")
-    env = hostcli.child_env()
+    seen = {}
+    monkeypatch.setattr(
+        hostcli, "run", lambda argv, *, env, **_k: seen.update(env) or _completed(stdout="{}")
+    )
+    hostcli.export_session_jsonl("s")
+    env = seen
     assert "OPENAI_API_KEY" not in env
     assert "PYTHONPATH" not in env
     assert "PATH" in env or os.name == "nt"
@@ -30,17 +34,17 @@ def test_child_env_is_an_allowlist(fake_home, monkeypatch):
 
 def test_child_env_never_inherits_a_session_binding(fake_home, monkeypatch):
     monkeypatch.setenv("HERMES_SESSION_KEY", "chat:123")
-    assert "HERMES_SESSION_KEY" not in hostcli.child_env()
+    assert "HERMES_SESSION_KEY" not in hostcli.child_env(hostcli.GH_ENV)
 
 
 def test_import_help_detects_the_hermes_choice(fake_home, monkeypatch):
     monkeypatch.setattr(hostcli, "run", lambda *a, **k: _completed(stdout="  --from {claude,codex,hermes}\n"))
-    assert hostcli.import_help_offers_hermes() is True
+    assert hostcli.import_offers_hermes() is True
 
 
 def test_import_help_says_no_when_only_foreign_sources(fake_home, monkeypatch):
     monkeypatch.setattr(hostcli, "run", lambda *a, **k: _completed(stdout="  --from {claude,codex}\n"))
-    assert hostcli.import_help_offers_hermes() is False
+    assert hostcli.import_offers_hermes() is False
 
 
 def test_import_help_is_false_when_the_cli_cannot_run(fake_home, monkeypatch):
@@ -48,7 +52,7 @@ def test_import_help_is_false_when_the_cli_cannot_run(fake_home, monkeypatch):
         raise hostcli.HostCliError("nope")
 
     monkeypatch.setattr(hostcli, "run", _boom)
-    assert hostcli.import_help_offers_hermes() is False
+    assert hostcli.import_offers_hermes() is False
 
 
 def test_export_failure_is_named(fake_home, monkeypatch):
@@ -102,29 +106,41 @@ def test_registered_handler_runs_through_the_real_dispatcher(fake_home, monkeypa
 
     ctx = FakeCtx()
     plugin.register(ctx)
-    out = invoke_plugin_command(ctx.commands["share"], "help", source=None, session_id=SESSION_A,
-                               session_key=SESSION_A, platform="cli")
+    out = invoke_plugin_command(
+        ctx.commands["share"],
+        "help",
+        source=None,
+        session_id=SESSION_A,
+        session_key=SESSION_A,
+        platform="cli",
+    )
     assert "/share confirm" in out
 
 
 def test_missing_redact_text_refuses_before_any_child_process(fake_home, seeded_store, monkeypatch):
     spawned: list = []
     monkeypatch.setattr(hostcli, "export_session_jsonl", lambda sid: spawned.append(sid) or "")
-    out = commands.handle_share("", rt=Runtime(FakeCtx(redact=False)), session_id=SESSION_A,
-                                session_key=SESSION_A, platform="cli")
+    out = commands.handle_share(
+        "", rt=Runtime(FakeCtx(redact=False)), session_id=SESSION_A, session_key=SESSION_A, platform="cli"
+    )
     assert "ctx.redact_text()" in out
     assert "Nothing was written or uploaded" in out
     assert spawned == []
-    assert store.load_pending(commands.data_dir(), SESSION_A) is None
+    assert store.load_pending(SESSION_A, "share") is None
 
 
 def test_settings_are_read_through_the_context():
-    assert Runtime(FakeCtx(settings={"allow_gateway_import": True})).setting("allow_gateway_import", False) is True
+    assert (
+        Runtime(FakeCtx(settings={"allow_gateway_import": True})).setting("allow_gateway_import", False)
+        is True
+    )
     assert Runtime(FakeCtx()).setting("allow_gateway_import", False) is False
 
 
-@pytest.mark.skipif(not os.environ.get("HERMES_TEST_HOST_BIN"),
-                    reason="set HERMES_TEST_HOST_BIN to a built hermes to run the live-CLI bridge test")
+@pytest.mark.skipif(
+    not os.environ.get("HERMES_TEST_HOST_BIN"),
+    reason="set HERMES_TEST_HOST_BIN to a built hermes to run the live-CLI bridge test",
+)
 def test_export_through_the_real_cli(fake_home, seeded_store, monkeypatch):
     """The one test that spawns the real host binary, so the bridge is proven end to end."""
     bin_dir = str(Path(os.environ["HERMES_TEST_HOST_BIN"]).parent)

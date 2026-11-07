@@ -110,17 +110,20 @@ def export_double(monkeypatch):
     from hermes_share import hostcli
 
     def _record(session_id: str, text: str) -> str:
-        return json.dumps({
-            "id": session_id,
-            "source": "cli",
-            "title": f"session {session_id}",
-            "model": "m",
-            "started_at": 1762400000.0,
-            "messages": [
-                {"role": "user", "content": f"hello\n{text}", "timestamp": 1762400001.0},
-                {"role": "assistant", "content": f"reply\n{text}", "timestamp": 1762400002.0},
-            ],
-        }, ensure_ascii=False)
+        return json.dumps(
+            {
+                "id": session_id,
+                "source": "cli",
+                "title": f"session {session_id}",
+                "model": "m",
+                "started_at": 1762400000.0,
+                "messages": [
+                    {"role": "user", "content": f"hello\n{text}", "timestamp": 1762400001.0},
+                    {"role": "assistant", "content": f"reply\n{text}", "timestamp": 1762400002.0},
+                ],
+            },
+            ensure_ascii=False,
+        )
 
     calls: list[str] = []
     html_calls: list[tuple[str, str]] = []
@@ -137,9 +140,7 @@ def export_double(monkeypatch):
         html_calls.append((session_id, str(destination)))
         body = state.get(session_id, _record(session_id, ""))
         Path(destination).write_text(
-            "<!DOCTYPE html><html><body><pre>"
-            + body.replace("<", "&lt;")
-            + "</pre></body></html>",
+            "<!DOCTYPE html><html><body><pre>" + body.replace("<", "&lt;") + "</pre></body></html>",
             encoding="utf-8",
         )
 
@@ -160,45 +161,72 @@ def recording_gh(monkeypatch):
             return "auth"
         return argv[2] if len(argv) > 2 else ""
 
-    def _fake_run(argv, *, timeout):
+    def _fake_run(argv, **_kw):
         calls.append(list(argv))
         verb = _verb(argv)
         if verb in ("auth", "delete"):
             return SimpleNamespace(returncode=0, stdout="Logged in" if verb == "auth" else "", stderr="")
         if verb == "create":
             return SimpleNamespace(
-                returncode=0, stdout="https://gist.github.com/testuser/abc123def456\n", stderr="")
+                returncode=0, stdout="https://gist.github.com/testuser/abc123def456\n", stderr=""
+            )
         if verb == "view":
             if "--files" in argv:
                 return SimpleNamespace(returncode=0, stdout="bundle.jsonl\nbundle.md\n", stderr="")
             name = argv[argv.index("--filename") + 1]
-            body = {"bundle.jsonl": '{"id":"x","messages":[{"role":"user","content":"hi"}]}\n',
-                    "bundle.md": "# shared\n"}[name]
+            body = {
+                "bundle.jsonl": '{"id":"x","messages":[{"role":"user","content":"hi"}]}\n',
+                "bundle.md": "# shared\n",
+            }[name]
             return SimpleNamespace(returncode=0, stdout=body, stderr="")
         return SimpleNamespace(returncode=1, stdout="", stderr="unknown verb")
 
-    monkeypatch.setattr(gists, "find_gh", lambda: "/usr/bin/gh")
-    monkeypatch.setattr(gists, "_run", _fake_run)
+    monkeypatch.setattr(gists, "shutil", SimpleNamespace(which=lambda name: f"/usr/bin/{name}"))
+    monkeypatch.setattr(gists, "run", _fake_run)
     return SimpleNamespace(calls=calls, verbs=lambda: [_verb(c) for c in calls])
 
 
 @pytest.fixture
 def claude_fixture(tmp_path):
     path = tmp_path / "claude-session.jsonl"
-    path.write_text("\n".join([
-        json.dumps({"type": "user", "sessionId": "c1", "message": {"role": "user", "content": "fix the build"}}),
-        json.dumps({"type": "assistant", "sessionId": "c1", "message": {"role": "assistant", "content": "done"}}),
-    ]) + "\n", encoding="utf-8")
+    path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "user",
+                        "sessionId": "c1",
+                        "message": {"role": "user", "content": "fix the build"},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "sessionId": "c1",
+                        "message": {"role": "assistant", "content": "done"},
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     return path
 
 
 @pytest.fixture
 def codex_fixture(tmp_path):
     path = tmp_path / "rollout-2026-11-06.jsonl"
-    path.write_text("\n".join([
-        json.dumps({"record_type": "state", "payload": {}}),
-        json.dumps({"type": "response_item", "payload": {"role": "user", "content": "hi"}}),
-    ]) + "\n", encoding="utf-8")
+    path.write_text(
+        "\n".join(
+            [
+                json.dumps({"record_type": "state", "payload": {}}),
+                json.dumps({"type": "response_item", "payload": {"role": "user", "content": "hi"}}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     return path
 
 
@@ -206,7 +234,10 @@ def codex_fixture(tmp_path):
 def hermes_fixture(tmp_path, planted_text):
     path = tmp_path / "hermes-bundle.jsonl"
     record = {
-        "id": "exported-0001", "source": "cli", "title": "Exported one", "model": "m",
+        "id": "exported-0001",
+        "source": "cli",
+        "title": "Exported one",
+        "model": "m",
         "started_at": 1762400000.0,
         "messages": [{"role": "user", "content": f"hello\n{planted_text}", "timestamp": 1762400001.0}],
     }

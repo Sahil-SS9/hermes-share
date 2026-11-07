@@ -14,7 +14,10 @@ from hermes_share.commands import Runtime
 
 def _record(session_id: str, text: str, title: str = "T") -> dict:
     return {
-        "id": session_id, "source": "cli", "title": title, "model": "m",
+        "id": session_id,
+        "source": "cli",
+        "title": title,
+        "model": "m",
         "started_at": 1762400000.0,
         "messages": [{"role": "user", "content": text, "timestamp": 1762400001.0}],
     }
@@ -46,7 +49,7 @@ def test_empty_input_is_refused():
 
 
 def test_redaction_removes_planted_credentials(fake_home, planted_text, planted):
-    record, _marks = bundle_mod.redact_session(json.loads(_jsonl("s1", planted_text)), _redactor())
+    record = bundle_mod.Scrubber(_redactor()).value(json.loads(_jsonl("s1", planted_text)))
     text = json.dumps(record, ensure_ascii=False)
 
     assert planted["openai"] not in text
@@ -56,14 +59,15 @@ def test_redaction_removes_planted_credentials(fake_home, planted_text, planted)
 
 
 def test_redaction_leaves_no_readable_key_fragment(fake_home, planted, planted_text):
-    record, _ = bundle_mod.redact_session(json.loads(_jsonl("s1", planted_text)), _redactor())
+    record = bundle_mod.Scrubber(_redactor()).value(json.loads(_jsonl("s1", planted_text)))
     text = json.dumps(record, ensure_ascii=False)
     assert "sk-pro" not in text, "the readable head of the key survived"
     assert planted["openai"][-4:] not in text, "the readable tail of the key survived"
 
 
 def test_home_paths_and_account_name_are_scrubbed(fake_home, planted_text):
-    text, counts = bundle_mod.redact_text(planted_text, _redactor(), bundle_mod.identity_tokens())
+    scrub = bundle_mod.Scrubber(_redactor())
+    text, counts = scrub.text(planted_text), scrub.counts
     user = getpass.getuser()
     assert f"/home/{user}" not in text
     assert "~" in text
@@ -73,8 +77,10 @@ def test_home_paths_and_account_name_are_scrubbed(fake_home, planted_text):
 
 
 def test_markdown_renders_every_session(fake_home):
-    sessions = [json.loads(_jsonl("a", "hello there", title="First")),
-                json.loads(_jsonl("b", "second one", title="Second"))]
+    sessions = [
+        json.loads(_jsonl("a", "hello there", title="First")),
+        json.loads(_jsonl("b", "second one", title="Second")),
+    ]
     md = bundle_mod.render_markdown(sessions)
     assert "# First" in md and "# Second" in md
     assert "hello there" in md and "second one" in md
@@ -82,35 +88,40 @@ def test_markdown_renders_every_session(fake_home):
 
 
 def test_markdown_handles_block_content(fake_home):
-    record = {"id": "x", "title": "Blocks", "messages": [
-        {"role": "user", "content": [{"type": "text", "text": "from a block"}], "timestamp": 1.0}
-    ]}
+    record = {
+        "id": "x",
+        "title": "Blocks",
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "from a block"}], "timestamp": 1.0}
+        ],
+    }
     assert "from a block" in bundle_mod.render_markdown([record])
 
 
-def test_bundle_refuses_more_than_the_cap(fake_home):
+def test_bundle_refuses_more_than_the_cap(fake_home, tmp_path):
     too_many = [f"s{n}" for n in range(bundle_mod.MAX_BUNDLE_SESSIONS + 1)]
     with pytest.raises(bundle_mod.BundleError) as excinfo:
-        bundle_mod.build(too_many, _redactor())
+        bundle_mod.build(too_many, _redactor(), tmp_path, "b")
     assert str(bundle_mod.MAX_BUNDLE_SESSIONS) in str(excinfo.value)
 
 
-def test_build_produces_valid_jsonl_and_counts(fake_home, export_double, planted_text, planted):
+def test_build_produces_valid_jsonl_and_counts(fake_home, export_double, planted_text, planted, tmp_path):
     export_double.state["s1"] = export_double.record("s1", planted_text)
     export_double.state["s2"] = export_double.record("s2", "nothing secret here")
 
-    built = bundle_mod.build(["s1", "s2"], _redactor())
+    built = bundle_mod.build(["s1", "s2"], _redactor(), tmp_path, "b")
+    jsonl, md = (path.read_text(encoding="utf-8") for path in built["files"])
     assert len(built["sessions"]) == 2
     assert built["totals"]["secrets"] >= 1
-    assert planted["openai"] not in built["jsonl"]
-    assert planted["openai"] not in built["markdown"]
-    for line in built["jsonl"].strip().splitlines():
+    assert planted["openai"] not in jsonl
+    assert planted["openai"] not in md
+    for line in jsonl.strip().splitlines():
         json.loads(line)
 
 
-def test_summary_lines_are_one_per_session(fake_home, export_double):
+def test_summary_lines_are_one_per_session(fake_home, export_double, tmp_path):
     export_double.state["s1"] = export_double.record("s1", "hi")
-    built = bundle_mod.build(["s1"], _redactor())
-    lines = bundle_mod.summary_lines(built)
+    built = bundle_mod.build(["s1"], _redactor(), tmp_path, "b")
+    lines = bundle_mod.summary_lines(built["sessions"])
     assert len(lines) == 1
     assert "s1" in lines[0]

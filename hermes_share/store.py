@@ -1,194 +1,130 @@
-"""Bounded, atomically-written JSON state: the share ledger and the pending previews.
+"""Plugin-data state: the share ledger, pending previews and retained files, all bounded.
 
-Both files live under the plugin-data directory and both are capped, so a long-lived profile
-cannot grow them without bound. Writes go through a temporary file in the same directory and
-``os.replace``, so a crash mid-write leaves the previous document intact.
+JSON writes go through a temporary file and ``os.replace``, so a crash mid-write keeps the previous
+document. The data root is re-resolved on every call so a profile switch is honoured, and when the
+host cannot resolve it we refuse by name rather than fall back to ``~/.hermes``.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
-import hashlib
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
-LEDGER_FILE = "ledger.json"
+from . import PLUGIN_NAME
+
 LEDGER_MAX_ROWS = 50
 PENDING_TTL_SECONDS = 15 * 60
-PENDING_MAX_FILES = 20
-PREVIEW_MAX_FILES = 20
-IMPORTS_MAX_FILES = 20
+MAX_FILES_PER_DIR = 20
+
+
+class StateRootUnavailable(RuntimeError):
+    """The host could not resolve the plugin-data root; nothing was written."""
+
+
+def data_dir(sub: str = "") -> Path:
+    """``<active hermes home>/plugin-data/hermes-share[/<sub>]``, created on demand."""
+    try:
+        from plugins.plugin_storage import plugin_data_dir
+
+        path = plugin_data_dir(PLUGIN_NAME) / sub
+    except Exception as exc:
+        raise StateRootUnavailable(
+            f"cannot resolve the Hermes plugin-data directory ({type(exc).__name__})"
+        ) from exc
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".tmp-", suffix=".json")
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".tmp-", suffix=".json")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=2, ensure_ascii=False, sort_keys=True)
-            handle.write("\n")
         os.chmod(tmp, 0o600)
         os.replace(tmp, path)
     except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
+        Path(tmp).unlink(missing_ok=True)
         raise
 
 
-def _read_json(path: Path, default: dict[str, Any]) -> dict[str, Any]:
+def _read_json(path: Path) -> dict[str, Any]:
     try:
-        raw = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return default
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def trim(directory: Path, keep: int = MAX_FILES_PER_DIR, ttl: float | None = None) -> None:
+    """Keep the newest *keep* files in *directory*, and none older than *ttl* seconds."""
+    try:
+        files = sorted(
+            (p for p in directory.iterdir() if p.is_file() and not p.name.startswith(".")),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
     except OSError:
-        return default
-    try:
-        loaded = json.loads(raw)
-    except (ValueError, TypeError):
-        return default
-    return loaded if isinstance(loaded, dict) else default
-
-
-def session_hash(session_id: str) -> str:
-    """A stable, opaque handle for a session id -- the ledger never stores the id itself."""
-    return hashlib.sha256(str(session_id or "").encode("utf-8")).hexdigest()[:16]
+        return
+    now = time.time()
+    for index, path in enumerate(files):
+        if index >= keep or (ttl is not None and now - path.stat().st_mtime > ttl):
+            path.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------- ledger
 
-def ledger_path(root: Path) -> Path:
-    return root / LEDGER_FILE
+
+def shares() -> list[dict[str, Any]]:
+    """Shared gists, newest first."""
+    return [r for r in _read_json(data_dir() / "ledger.json").get("shares") or [] if isinstance(r, dict)]
 
 
-def load_ledger(root: Path) -> dict[str, Any]:
-    data = _read_json(ledger_path(root), {"version": 1, "shares": []})
-    shares = data.get("shares")
-    if not isinstance(shares, list):
-        shares = []
-    data["shares"] = [row for row in shares if isinstance(row, dict)]
-    data.setdefault("version", 1)
-    return data
+def _save_shares(rows: list[dict[str, Any]]) -> None:
+    _write_json(data_dir() / "ledger.json", {"version": 1, "shares": rows[:LEDGER_MAX_ROWS]})
 
 
-def append_share(root: Path, row: dict[str, Any]) -> dict[str, Any]:
-    """Add one share row, newest first, trimmed to :data:`LEDGER_MAX_ROWS`."""
-    data = load_ledger(root)
-    rows = [r for r in data["shares"] if r.get("gist_id") != row.get("gist_id")]
-    rows.insert(0, row)
-    data["shares"] = rows[:LEDGER_MAX_ROWS]
-    _write_json(ledger_path(root), data)
-    return data
+def add_share(row: dict[str, Any]) -> None:
+    _save_shares([row] + [r for r in shares() if r.get("gist_id") != row["gist_id"]])
 
 
-def update_share(root: Path, gist_id: str, **fields: Any) -> Optional[dict[str, Any]]:
-    data = load_ledger(root)
-    for row in data["shares"]:
+def mark_revoked(gist_id: str, when: str) -> None:
+    rows = shares()
+    for row in rows:
         if row.get("gist_id") == gist_id:
-            row.update(fields)
-            _write_json(ledger_path(root), data)
-            return row
-    return None
-
-
-def find_share(root: Path, gist_id: str) -> Optional[dict[str, Any]]:
-    for row in load_ledger(root)["shares"]:
-        if row.get("gist_id") == gist_id:
-            return row
-    return None
-
-
-def latest_live_share(root: Path) -> Optional[dict[str, Any]]:
-    """Newest row that has not been revoked yet."""
-    for row in load_ledger(root)["shares"]:
-        if row.get("status", "shared") == "shared":
-            return row
-    return None
+            row.update(status="revoked", revoked=when)
+    _save_shares(rows)
 
 
 # ---------------------------------------------------------------- pending previews
 
-def pending_path(root: Path, key: str) -> Path:
-    return root / "pending" / f"{session_hash(key)}.json"
+
+def _pending_path(key: str) -> Path:
+    """Keyed by a hash so the file name never carries a session id."""
+    return data_dir("pending") / f"{hashlib.sha256(key.encode('utf-8')).hexdigest()[:16]}.json"
 
 
-def save_pending(root: Path, key: str, payload: dict[str, Any]) -> None:
-    payload = dict(payload)
-    payload["created"] = time.time()
-    path = pending_path(root, key)
-    _write_json(path, payload)
-    trim_pending(root)
+def save_pending(key: str, payload: dict[str, Any]) -> None:
+    _write_json(_pending_path(key), {**payload, "created": time.time()})
+    trim(data_dir("pending"), ttl=PENDING_TTL_SECONDS)
 
 
-def load_pending(root: Path, key: str) -> Optional[dict[str, Any]]:
-    """The pending preview for *key*, or None when it is absent or older than the TTL."""
-    data = _read_json(pending_path(root, key), {})
+def load_pending(key: str, kind: str) -> dict[str, Any] | None:
+    """The pending *kind* preview for *key*, or None when absent, of another kind, or expired."""
+    data = _read_json(_pending_path(key))
     created = data.get("created")
-    if not isinstance(created, (int, float)):
+    if data.get("kind") != kind or not isinstance(created, (int, float)):
         return None
-    if time.time() - float(created) > PENDING_TTL_SECONDS:
-        clear_pending(root, key)
+    if time.time() - created > PENDING_TTL_SECONDS:
+        clear_pending(key)
         return None
     return data
 
 
-def clear_pending(root: Path, key: str) -> None:
-    try:
-        pending_path(root, key).unlink()
-    except OSError:
-        pass
-
-
-def trim_pending(root: Path) -> None:
-    """Expire stale pendings and cap the directory at :data:`PENDING_MAX_FILES`."""
-    directory = root / "pending"
-    try:
-        entries = [p for p in directory.iterdir() if p.suffix == ".json"]
-    except OSError:
-        return
-    now = time.time()
-    live: list[tuple[float, Path]] = []
-    for path in entries:
-        try:
-            age = now - path.stat().st_mtime
-        except OSError:
-            continue
-        if age > PENDING_TTL_SECONDS:
-            try:
-                path.unlink()
-            except OSError:
-                pass
-            continue
-        live.append((age, path))
-    for _age, path in sorted(live, reverse=True)[PENDING_MAX_FILES:]:
-        try:
-            path.unlink()
-        except OSError:
-            pass
-
-
-def trim_previews(root: Path) -> None:
-    """Cap retained preview documents, newest first."""
-    _trim_dir(root / "previews", PREVIEW_MAX_FILES)
-
-
-def trim_imports(root: Path) -> None:
-    """Cap retained import downloads, newest first."""
-    _trim_dir(root / "imports", IMPORTS_MAX_FILES)
-
-
-def _trim_dir(directory: Path, keep: int) -> None:
-    try:
-        files = [p for p in directory.iterdir() if p.is_file() and not p.name.startswith(".")]
-    except OSError:
-        return
-    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    for path in files[keep:]:
-        try:
-            path.unlink()
-        except OSError:
-            pass
+def clear_pending(key: str) -> None:
+    _pending_path(key).unlink(missing_ok=True)
