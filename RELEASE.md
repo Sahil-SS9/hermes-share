@@ -32,8 +32,9 @@ Order of work before a submission:
   `ctx.redact_text`. `hermes plugins validate` reports no private core imports.
 - **Chat platforms** get real support for sharing (short preview, same confirm, URL back). Import
   from chat is gated behind `allow_gateway_import` because it writes into this Hermes's store.
-- **html** was dropped: it was rendered by the private `session_export` module, which the plugin no
-  longer imports. The Markdown file is the readable view.
+- **html** is back and is part of the default bundle: `hermes sessions export --format html`
+  renders it, one call per session, so the plugin keeps no private renderer. 0.1.0's html was
+  produced by `hermes_cli.session_export`, which is exactly what this lane removed.
 - Branch renamed `master` → `main`.
 
 ## Known limitations

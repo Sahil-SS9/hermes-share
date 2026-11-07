@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 from typing import Optional
 
 EXPORT_TIMEOUT_SECONDS = 120
@@ -89,6 +90,23 @@ def export_session_jsonl(session_id: str) -> str:
     if not text:
         raise HostCliError(f"`hermes sessions export` produced nothing for {session_id}")
     return text + "\n"
+
+
+def export_session_html(session_id: str, destination: Path) -> None:
+    """Write the standalone HTML document ``hermes sessions export --format html`` renders.
+
+    HTML is the one export format that refuses ``-``: the CLI writes the file itself, so the caller
+    names the path. One call per session, because the CLI renders a single session per document.
+    """
+    result = run(["sessions", "export", str(destination), "--format", "html", "--session-id", session_id])
+    if result.returncode != 0:
+        detail = _last_line(result.stderr or result.stdout)
+        raise HostCliError(
+            f"`hermes sessions export --format html` failed for {session_id}"
+            + (f": {detail}" if detail else "")
+        )
+    if not destination.is_file():
+        raise HostCliError(f"the HTML export for {session_id} wrote no file")
 
 
 def import_help_offers_hermes() -> bool:

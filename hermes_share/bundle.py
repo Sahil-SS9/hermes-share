@@ -13,6 +13,7 @@ import json
 import os
 import re
 import socket
+from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
 MAX_BUNDLE_SESSIONS = 12
@@ -180,10 +181,17 @@ def render_markdown(sessions: Iterable[dict[str, Any]]) -> str:
     return "\n".join(out).rstrip() + "\n"
 
 
-def build(session_ids: list[str], redact: Redactor) -> dict[str, Any]:
-    """Export, redact and render every session in the bundle."""
+def build(session_ids: list[str], redact: Redactor, *, formats: Optional[set[str]] = None,
+          html_paths: Optional[dict[str, "os.PathLike[str] | str"]] = None) -> dict[str, Any]:
+    """Export, redact and render every session in the bundle.
+
+    ``formats`` carries the kinds to produce (``jsonl``, ``md``, ``html``). HTML is rendered by the
+    host CLI into the caller's path, one call per session, then redacted in place like every other
+    file -- it is a public export format, not a private renderer.
+    """
     from . import hostcli
 
+    formats = {"jsonl", "md"} if formats is None else set(formats)
     if not session_ids:
         raise BundleError("no sessions selected")
     if len(session_ids) > MAX_BUNDLE_SESSIONS:
@@ -193,6 +201,7 @@ def build(session_ids: list[str], redact: Redactor) -> dict[str, Any]:
     tokens = identity_tokens()
     records: list[dict[str, Any]] = []
     stats: list[dict[str, Any]] = []
+    html_docs: list[dict[str, Any]] = []
     for session_id in session_ids:
         raw = parse_export_jsonl(hostcli.export_session_jsonl(session_id), origin=session_id)
         if len(raw) != 1:
@@ -211,18 +220,39 @@ def build(session_ids: list[str], redact: Redactor) -> dict[str, Any]:
             "messages": len(record.get("messages") or []),
             "secrets": secret_marks,
         })
+        if "html" in formats:
+            target = (html_paths or {}).get(session_id)
+            if target is None:
+                raise BundleError(f"{session_id}: html was requested but no output path was given")
+            path = Path(target)
+            hostcli.export_session_html(session_id, path)
+            document, scrub = redact_text(path.read_text(encoding="utf-8", errors="replace"), redact, tokens)
+            path.write_text(document, encoding="utf-8")
+            try:
+                path.chmod(0o600)
+            except OSError:
+                pass
+            html_docs.append({"id": str(record.get("id") or session_id), "path": path, "scrub": scrub})
 
     jsonl_text = "\n".join(json.dumps(record, ensure_ascii=False, default=str) for record in records) + "\n"
     jsonl_text, jsonl_scrub = redact_text(jsonl_text, redact, tokens)
     md_text = render_markdown(records)
     md_text, md_scrub = redact_text(md_text, redact, tokens)
 
+    html_scrub = {"secrets": 0, "paths": 0, "identities": 0}
+    for doc in html_docs:
+        for key, value in doc.pop("scrub").items():
+            html_scrub[key] = html_scrub.get(key, 0) + value
+
     totals = {
-        "secrets": sum(item["secrets"] for item in stats) + jsonl_scrub["secrets"] + md_scrub["secrets"],
-        "paths": jsonl_scrub["paths"] + md_scrub["paths"],
-        "identities": jsonl_scrub["identities"] + md_scrub["identities"],
+        "secrets": (sum(item["secrets"] for item in stats)
+                    + jsonl_scrub["secrets"] + md_scrub["secrets"] + html_scrub["secrets"]),
+        "paths": jsonl_scrub["paths"] + md_scrub["paths"] + html_scrub["paths"],
+        "identities": (jsonl_scrub["identities"] + md_scrub["identities"]
+                       + html_scrub["identities"]),
     }
-    return {"sessions": stats, "jsonl": jsonl_text, "markdown": md_text, "totals": totals}
+    return {"sessions": stats, "jsonl": jsonl_text, "markdown": md_text, "html": html_docs,
+            "totals": totals}
 
 
 def summary_lines(bundle: dict[str, Any]) -> list[str]:

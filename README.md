@@ -33,14 +33,18 @@ Nothing is uploaded until you type the confirm command, and redaction has no off
 
 ## What a bundle is
 
-Two files in one secret gist:
+Three files in one secret gist:
 
 | File | Purpose |
 | --- | --- |
 | `hermes-sessions-<stamp>.jsonl` | the importable record, one session per line, exactly the shape `hermes sessions export` writes |
 | `hermes-sessions-<stamp>.md` | the readable transcript |
+| `hermes-session-<id>-<stamp>.html` | the standalone HTML page, one per session |
 
-`--format md` or `--format jsonl` ships just one of them.
+Every file comes from the public `hermes sessions export` CLI — the HTML included, which the CLI
+renders itself (one call per session; it is the one format that refuses `-`). `--format` narrows the
+set: `jsonl`, `md`, `html`, `both` (jsonl+md), `all` (the default), or a comma-separated list such as
+`--format md,html`.
 
 ## What is redacted
 
@@ -139,7 +143,7 @@ HERMES_TEST_HOST_BIN=/path/to/hermes/.venv/bin/hermes \
 PYTHONPATH=/path/to/hermes-agent-checkout .venv/bin/python -m pytest -q
 ```
 
-65 tests against a temporary `HOME`/`HERMES_HOME` and a real `SessionDB`: bundle parsing, sentinel
+69 tests against a temporary `HOME`/`HERMES_HOME` and a real `SessionDB`: bundle parsing, sentinel
 masking, home and identity scrubbing, content detection for all three formats, the confirm gate (no
 child process before it), the `#87988` refusal, the gateway consent gate, chat-platform sharing,
 ledger bounds, TTLs, `/unshare`, and one end-to-end export through the real CLI binary.

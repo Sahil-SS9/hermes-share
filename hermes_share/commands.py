@@ -31,7 +31,7 @@ USAGE = """\
   /share                        share this session
   /share <id|title> [...]       share the named sessions (up to 12)
   /share --last N               share the N most recent sessions
-  /share --format md|jsonl|both which files the gist carries (default: both)
+  /share --format <kinds>       jsonl, md, html, both (jsonl+md), all (default), or a list
   /share confirm                upload the preview as a SECRET gist
   /share cancel                 delete the preview and forget it
   /share list                   gists this profile has shared
@@ -101,16 +101,26 @@ def _pending_key(session_key: str, session_id: str) -> str:
 
 # ---------------------------------------------------------------- sharing
 
-def _check_format(token: str) -> str:
-    value = (token or "").strip().lower()
-    if value not in ("md", "jsonl", "both"):
-        raise ValueError(f"unknown format {value!r} - use md, jsonl or both")
-    return value
+def _check_format(token: str) -> frozenset[str]:
+    """``md``, ``html``, ``jsonl``, ``both`` (jsonl+md), ``all``, or a comma-separated list."""
+    raw = (token or "").strip().lower()
+    if raw in ("both",):
+        return frozenset({"jsonl", "md"})
+    if raw in ("all", ""):
+        return frozenset({"jsonl", "md", "html"})
+    kinds = {part.strip() for part in raw.split(",") if part.strip()}
+    unknown = kinds - {"md", "html", "jsonl"}
+    if unknown or not kinds:
+        raise ValueError(
+            f"unknown format {token!r} - use md, html, jsonl, both, all, or a comma-separated list"
+        )
+    return frozenset(kinds)
 
 
 def _parse_share_args(raw: str) -> dict[str, Any]:
     tokens = (raw or "").split()
-    parsed: dict[str, Any] = {"sub": "", "selectors": [], "last": 0, "format": "both", "rest": ""}
+    parsed: dict[str, Any] = {"sub": "", "selectors": [], "last": 0,
+                              "format": _check_format("all"), "rest": ""}
     index = 0
     while index < len(tokens):
         token = tokens[index]
@@ -145,16 +155,27 @@ def _parse_share_args(raw: str) -> dict[str, Any]:
     return parsed
 
 
-def _bundle_files(root: Path, bundle: dict[str, Any], fmt: str) -> list[Path]:
+def _safe_id(session_id: str) -> str:
+    return "".join(ch for ch in str(session_id) if ch.isalnum() or ch in ("-", "_")) or "session"
+
+
+def _format_label(value: Any) -> str:
+    """A ledger-safe one-word description of the kinds in a bundle."""
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return ",".join(str(item) for item in sorted(value))
+    return str(value or "")
+
+
+def _bundle_files(root: Path, bundle: dict[str, Any], formats: frozenset[str]) -> list[Path]:
     stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     directory = root / "previews"
     directory.mkdir(parents=True, exist_ok=True)
     paths: list[Path] = []
-    if fmt in ("jsonl", "both"):
+    if "jsonl" in formats:
         path = directory / f"hermes-sessions-{stamp}.jsonl"
         path.write_text(bundle["jsonl"], encoding="utf-8")
         paths.append(path)
-    if fmt in ("md", "both"):
+    if "md" in formats:
         path = directory / f"hermes-sessions-{stamp}.md"
         path.write_text(bundle["markdown"], encoding="utf-8")
         paths.append(path)
@@ -166,10 +187,20 @@ def _bundle_files(root: Path, bundle: dict[str, Any], fmt: str) -> list[Path]:
     return paths
 
 
+def _html_paths(root: Path, session_ids: list[str], formats: frozenset[str]) -> dict[str, Path]:
+    """One document per session: the CLI renders a single session per HTML file."""
+    if "html" not in formats:
+        return {}
+    stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    directory = root / "previews"
+    directory.mkdir(parents=True, exist_ok=True)
+    return {sid: directory / f"hermes-session-{_safe_id(sid)}-{stamp}.html" for sid in session_ids}
+
+
 def _preview_text(bundle: dict[str, Any], paths: list[Path], description: str,
                   warning: str) -> str:
     totals = bundle["totals"]
-    total_bytes = len(bundle["jsonl"].encode("utf-8")) + len(bundle["markdown"].encode("utf-8"))
+    total_bytes = sum(path.stat().st_size for path in paths if path.is_file())
     lines = ["/share - preview ready, nothing uploaded", "", f"  sessions   {len(bundle['sessions'])}"]
     lines.extend(bundle_mod.summary_lines(bundle))
     lines += [
@@ -221,9 +252,11 @@ def _resolve_ids(selectors: list[str], last: int, current: str) -> list[str]:
 def _do_preview(rt: Runtime, *, session_id: str, pending_key: str, parsed: dict[str, Any]) -> str:
     redact = rt.redactor()
     ids = _resolve_ids(parsed["selectors"], parsed["last"], session_id)
-    built = bundle_mod.build(ids, redact)
     root = data_dir()
-    paths = _bundle_files(root, built, parsed["format"])
+    formats = parsed["format"]
+    built = bundle_mod.build(ids, redact, formats=formats, html_paths=_html_paths(root, ids, formats))
+    paths = _bundle_files(root, built, formats)
+    paths += [doc["path"] for doc in built["html"]]
     store.trim_previews(root)
 
     titles = ", ".join(item["title"] for item in built["sessions"][:2])
@@ -240,7 +273,7 @@ def _do_preview(rt: Runtime, *, session_id: str, pending_key: str, parsed: dict[
         {
             "kind": "share",
             "paths": [str(path) for path in paths],
-            "format": parsed["format"],
+            "format": sorted(formats),
             "description": description,
             "sessions": built["sessions"],
         },
@@ -278,7 +311,7 @@ def _do_confirm(rt: Runtime, *, pending_key: str, platform: str) -> str:
         "url": result["url"],
         "sessions": pending.get("sessions") or [],
         "files": [path.name for path in paths],
-        "format": str(pending.get("format") or ""),
+        "format": _format_label(pending.get("format")),
         "created": _now_utc(),
         "status": "shared",
     }

@@ -23,14 +23,15 @@ def _unshare(raw: str = "", *, ctx=None, session_id: str = SESSION_A):
                                    session_key=session_id, platform="cli")
 
 
-def test_current_session_preview_writes_both_files(seeded_store, recording_gh, export_double):
+def test_current_session_preview_writes_every_file(seeded_store, recording_gh, export_double):
     export_double.state[SESSION_A] = export_double.record(SESSION_A, "hello")
     out = _share()
     assert "preview ready, nothing uploaded" in out
-    assert ".jsonl" in out and ".md" in out
+    assert ".jsonl" in out and ".md" in out and ".html" in out
 
     pending = store.load_pending(commands.data_dir(), SESSION_A)
     assert pending and pending["kind"] == "share"
+    assert len(pending["paths"]) == 3
     for item in pending["paths"]:
         assert Path(item).is_file()
 
@@ -111,7 +112,48 @@ def test_unknown_selector_is_refused_by_name(seeded_store, recording_gh, export_
 def test_format_jsonl_ships_one_file(seeded_store, recording_gh, export_double):
     export_double.state[SESSION_A] = export_double.record(SESSION_A, "hi")
     out = _share("--format jsonl")
-    assert ".md" not in out
+    assert ".jsonl" in out
+    assert ".md" not in out and ".html" not in out
+
+
+def test_html_is_rendered_by_the_public_cli_one_call_per_session(seeded_store, recording_gh,
+                                                                export_double):
+    """HTML is a public export format: one CLI call per session, no private renderer."""
+    for session_id in (SESSION_A, SESSION_B):
+        export_double.state[session_id] = export_double.record(session_id, "hi")
+    _share("--last 2 --format html")
+    assert sorted(call[0] for call in export_double.html_calls) == sorted([SESSION_A, SESSION_B])
+    assert len(set(call[1] for call in export_double.html_calls)) == 2
+
+
+def test_html_is_redacted_like_every_other_file(seeded_store, recording_gh, export_double,
+                                               planted_text, planted):
+    export_double.state[SESSION_A] = export_double.record(SESSION_A, planted_text)
+    _share("--format html")
+    pending = store.load_pending(commands.data_dir(), SESSION_A)
+    document = Path(pending["paths"][0]).read_text(encoding="utf-8")
+    assert document.startswith("<!DOCTYPE html>")
+    assert planted["openai"] not in document
+    assert planted["github"] not in document
+    assert "«redacted" in document
+    assert Path(pending["paths"][0]).stat().st_mode & 0o077 == 0
+
+
+def test_format_all_is_the_default_and_lists_three_kinds(seeded_store, recording_gh,
+                                                         export_double):
+    export_double.state[SESSION_A] = export_double.record(SESSION_A, "hi")
+    default = _share()
+    explicit = _share("--format all", session_id=SESSION_B, session_key=SESSION_B)
+    for token in ("sessions", "secret mark(s)"):
+        assert token in default and token in explicit
+    assert default.count(".html") == explicit.count(".html") == 1
+
+
+def test_format_comma_list_is_accepted(seeded_store, recording_gh, export_double):
+    export_double.state[SESSION_A] = export_double.record(SESSION_A, "hi")
+    out = _share("--format md,html")
+    assert ".html" in out and ".md" in out
+    assert ".jsonl" not in out
 
 
 def test_bad_format_is_refused(seeded_store, recording_gh, export_double):

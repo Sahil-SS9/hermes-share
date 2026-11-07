@@ -123,14 +123,29 @@ def export_double(monkeypatch):
         }, ensure_ascii=False)
 
     calls: list[str] = []
+    html_calls: list[tuple[str, str]] = []
     state: dict[str, str] = {}
 
     def _fake(session_id: str) -> str:
         calls.append(session_id)
         return state.get(session_id, _record(session_id, "")) + "\n"
 
+    def _fake_html(session_id: str, destination) -> None:
+        """Stand in for the CLI's own HTML writer: same shape, a real file."""
+        from pathlib import Path
+
+        html_calls.append((session_id, str(destination)))
+        body = state.get(session_id, _record(session_id, ""))
+        Path(destination).write_text(
+            "<!DOCTYPE html><html><body><pre>"
+            + body.replace("<", "&lt;")
+            + "</pre></body></html>",
+            encoding="utf-8",
+        )
+
     monkeypatch.setattr(hostcli, "export_session_jsonl", _fake)
-    return SimpleNamespace(calls=calls, state=state, record=_record)
+    monkeypatch.setattr(hostcli, "export_session_html", _fake_html)
+    return SimpleNamespace(calls=calls, html_calls=html_calls, state=state, record=_record)
 
 
 @pytest.fixture
