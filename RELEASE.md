@@ -8,7 +8,7 @@ drafted and deliberately **not** submitted: `RELEASE.md` and the entry's `known_
 has a missing *public* one.
 
 Drafted entry: `plugin-catalog/hermes-share.yaml`, pinned to
-`7da00a2f8cc38f685260a6eff61cb68532c99b3c` — a LOCAL commit that is not pushed anywhere, so the pin
+`a2b5c4edb474d8dffd442ba57c64cd55eb4c7bb9` — a LOCAL commit that is not pushed anywhere, so the pin
 is not fetchable yet. Structural check against the host's own validator:
 `scripts/validate_plugin_catalog.py plugin-catalog/hermes-share.yaml` → `OK: 1 file(s) valid`
 (category must be one of desktop/memory/platform/web/tools/voice/automation/models/general;

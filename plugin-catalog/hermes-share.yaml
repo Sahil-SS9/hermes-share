@@ -1,6 +1,8 @@
 # DRAFT catalog entry -- do not submit.
 #
-# `sha:` pins 7da00a2f8cc38f685260a6eff61cb68532c99b3c, the release commit this draft describes.
+# `sha:` pins a2b5c4edb474d8dffd442ba57c64cd55eb4c7bb9, the release commit this draft describes.
+# (The repo's own copy of this file inside that commit still shows the previous pin: a file
+# cannot pin the commit that contains it. The pin that ships is the one in the catalog PR.)
 # It is a LOCAL commit: the repository is not public yet, so the pin is not fetchable and
 # `hermes plugins install` would fail. Do not open a catalog PR until:
 #   1. the repo is public at https://github.com/Sahil-SS9/hermes-share with this commit pushed;
@@ -12,7 +14,7 @@
 
 name: hermes-share
 repo: https://github.com/Sahil-SS9/hermes-share
-sha: "7da00a2f8cc38f685260a6eff61cb68532c99b3c"
+sha: "a2b5c4edb474d8dffd442ba57c64cd55eb4c7bb9"
 subdir: ""
 title: "Session Share"
 version: "0.2.0"
