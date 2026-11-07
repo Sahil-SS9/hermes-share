@@ -33,13 +33,13 @@ Nothing is uploaded until you type the confirm command, and redaction has no off
 
 ## What a bundle is
 
-Three files in one secret gist:
+Up to three kinds of file in one secret gist:
 
 | File | Purpose |
 | --- | --- |
 | `hermes-sessions-<stamp>.jsonl` | the importable record, one session per line, exactly the shape `hermes sessions export` writes |
 | `hermes-sessions-<stamp>.md` | the readable transcript |
-| `hermes-session-<id>-<stamp>.html` | the standalone HTML page, one per session |
+| `hermes-sessions-<stamp>-<id>.html` | the standalone HTML page, one per session |
 
 Every file comes from the public `hermes sessions export` CLI — the HTML included, which the CLI
 renders itself (one call per session; it is the one format that refuses `-`). `--format` narrows the
