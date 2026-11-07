@@ -20,6 +20,7 @@ LEDGER_MAX_ROWS = 50
 PENDING_TTL_SECONDS = 15 * 60
 PENDING_MAX_FILES = 20
 PREVIEW_MAX_FILES = 20
+IMPORTS_MAX_FILES = 20
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -172,13 +173,21 @@ def trim_pending(root: Path) -> None:
 
 def trim_previews(root: Path) -> None:
     """Cap retained preview documents, newest first."""
-    directory = root / "previews"
+    _trim_dir(root / "previews", PREVIEW_MAX_FILES)
+
+
+def trim_imports(root: Path) -> None:
+    """Cap retained import downloads, newest first."""
+    _trim_dir(root / "imports", IMPORTS_MAX_FILES)
+
+
+def _trim_dir(directory: Path, keep: int) -> None:
     try:
         files = [p for p in directory.iterdir() if p.is_file() and not p.name.startswith(".")]
     except OSError:
         return
     files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    for path in files[PREVIEW_MAX_FILES:]:
+    for path in files[keep:]:
         try:
             path.unlink()
         except OSError:

@@ -1,7 +1,7 @@
 [project]
 name = "hermes-share"
-version = "0.1.0"
-description = "Share a redacted, revocable secret GitHub gist of the current Hermes session"
+version = "0.2.0"
+description = "Share redacted, revocable session bundles as secret GitHub gists, and import them back"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
@@ -16,4 +16,4 @@ testpaths = ["tests"]
 addopts = "-ra"
 
 [tool.ruff]
-line-length = 100
+line-length = 110

@@ -1,37 +1,70 @@
-"""Shared fixtures: a throwaway HOME/HERMES_HOME and a session with planted fake secrets.
+"""Fixtures: a throwaway HOME/HERMES_HOME, a real session store, and a faithful plugin context.
 
-Every test runs against a temporary Hermes home. Nothing here touches the operator's profile, and
-the planted credentials are invented by this file -- they are assembled from parts so no
-contiguous key-shaped literal sits in the source.
+The planted credentials are invented here and assembled from parts, so no contiguous key-shaped
+literal sits in the source. ``redact_text`` delegates to the host's own scrubber in the strongest
+mode, which is exactly what ``ctx.redact_text`` does -- a stand-in that quietly masked less would
+make every redaction test prove nothing.
 """
 
 from __future__ import annotations
 
 import getpass
+import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-ROOT = Path(__file__).resolve().parent
-if str(ROOT) not in sys.path:  # the plugin package is imported by its repo name, never installed
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-SESSION_ID = "sess-share-0001"
-
-# Assembled from parts: the runtime strings are realistic, the source contains no key-shaped literal.
 PLANTED = {
     "openai": "sk-" + "proj-" + "Zx9Qw8Er7Ty6Ui5Op4As3Df2Gh1Jk0Lz",
     "github": "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8",
-    "bearer": "Bearer " + "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" + "." + "cGF5bG9hZA" + "." + "c2lnbmF0dXJl",
+    "bearer": "Bearer " + "eyJhbGciOiJIUzI1NiJ9" + "." + "eyJzdWIiOiIxIn0" + "." + "c2ln",
     "env_name": "DEPLOY_" + "TOKEN",
     "env_value": "zq8" + "Vt7" + "Lm2" + "Wp5" + "Rn9" + "Kd4",
 }
 
+SESSION_A = "share-a-0001"
+SESSION_B = "share-b-0002"
+
+
+def _host_redact(text: str) -> str:
+    from agent.redact import redact_sensitive_text
+
+    return redact_sensitive_text(text, force=True, file_read=True, secret_file=True)
+
+
+class FakeCtx:
+    """A plugin context with only the public surface this plugin uses."""
+
+    def __init__(self, *, redact: bool = True, settings: dict | None = None) -> None:
+        self.commands: dict[str, object] = {}
+        self._settings = settings or {}
+        self._redact = _host_redact if redact else None
+
+    def redact_text(self, text: str, *, force: bool = False) -> str:  # pragma: no cover - opt-in
+        assert self._redact is not None
+        return self._redact(text)
+
+    def __getattribute__(self, name):
+        # ``redact=False`` must look like a host that has no such method at all.
+        if name == "redact_text" and object.__getattribute__(self, "_redact") is None:
+            raise AttributeError(name)
+        return object.__getattribute__(self, name)
+
+    def get_config(self, key: str, default=None):
+        return self._settings.get(key, default)
+
+    def register_command(self, name, handler, description="", args_hint="", **_kw):
+        self.commands[name] = handler
+
 
 @pytest.fixture
 def fake_home(tmp_path, monkeypatch):
-    """A temporary HOME plus HERMES_HOME, so no test can see or write the real profile."""
     home = tmp_path / "user-home"
     hermes = tmp_path / "hermes-home"
     home.mkdir()
@@ -42,59 +75,72 @@ def fake_home(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def planted() -> dict[str, str]:
-    """The planted fake credentials, so no test module has to import conftest."""
+def planted():
     return PLANTED
 
 
 @pytest.fixture
-def planted_text(planted) -> str:
+def planted_text(planted):
     user = getpass.getuser()
     return (
-        f"my key is {PLANTED['openai']} and the bot token is {PLANTED['github']}\n"
-        f"curl -H 'Authorization: {PLANTED['bearer']}' https://example.invalid/api\n"
-        f"{PLANTED['env_name']}={PLANTED['env_value']}\n"
-        f"the repo lives at /home/{user}/work/secret-project and I am {user}\n"
-        f"windows path C:\\Users\\{user}\\work\n"
+        f"key {planted['openai']} token {planted['github']}\n"
+        f"curl -H 'Authorization: {planted['bearer']}' https://example.invalid/api\n"
+        f"{planted['env_name']}={planted['env_value']}\n"
+        f"repo at /home/{user}/work/secret-project and I am {user}\n"
     )
 
 
 @pytest.fixture
-def seeded_session(fake_home, planted_text):
-    """A real SessionDB under the temporary home, holding one conversation with the planted text."""
+def seeded_store(fake_home, planted_text):
+    """Two real sessions in the temporary home, both holding the planted text."""
     from hermes_state import SessionDB
 
     with SessionDB(db_path=Path(fake_home) / "state.db") as db:
-        db.create_session(SESSION_ID, source="cli", model="share-test-model")
-        db.append_message(SESSION_ID, "user", content=f"here is my setup\n{planted_text}")
-        db.append_message(
-            SESSION_ID, "assistant",
-            content="Noted. I ran the deploy and it printed the token back:\n" + planted_text,
-        )
-        db.append_message(SESSION_ID, "tool", content=planted_text, tool_name="terminal")
-    return SESSION_ID
+        for session_id, title in ((SESSION_A, "Deploy notes"), (SESSION_B, "Second session")):
+            db.create_session(session_id, source="cli", model="share-test-model")
+            db.set_session_title(session_id, title)
+            db.append_message(session_id, "user", content=f"setup\n{planted_text}")
+            db.append_message(session_id, "assistant", content=f"ack\n{planted_text}")
+    return [SESSION_A, SESSION_B]
 
 
 @pytest.fixture
-def no_gh(monkeypatch):
-    """No gh on PATH."""
-    from hermes_share import gists
+def export_double(monkeypatch):
+    """Serve ``hermes sessions export`` from an in-memory session record instead of a child process."""
+    from hermes_share import hostcli
 
-    monkeypatch.setattr(gists, "find_gh", lambda: None)
-    return gists
+    def _record(session_id: str, text: str) -> str:
+        return json.dumps({
+            "id": session_id,
+            "source": "cli",
+            "title": f"session {session_id}",
+            "model": "m",
+            "started_at": 1762400000.0,
+            "messages": [
+                {"role": "user", "content": f"hello\n{text}", "timestamp": 1762400001.0},
+                {"role": "assistant", "content": f"reply\n{text}", "timestamp": 1762400002.0},
+            ],
+        }, ensure_ascii=False)
+
+    calls: list[str] = []
+    state: dict[str, str] = {}
+
+    def _fake(session_id: str) -> str:
+        calls.append(session_id)
+        return state.get(session_id, _record(session_id, "")) + "\n"
+
+    monkeypatch.setattr(hostcli, "export_session_jsonl", _fake)
+    return SimpleNamespace(calls=calls, state=state, record=_record)
 
 
 @pytest.fixture
 def recording_gh(monkeypatch):
-    """A gh that records every argv it is asked to run and reports success."""
-    from types import SimpleNamespace
-
+    """A gh that records every argv and reports success for the verbs the plugin uses."""
     from hermes_share import gists
 
     calls: list[list[str]] = []
 
-    def _verb(argv: list[str]) -> str:
-        """``gh auth status`` vs ``gh gist create``: the subcommand sits after the group."""
+    def _verb(argv):
         if len(argv) > 1 and argv[1] == "auth":
             return "auth"
         return argv[2] if len(argv) > 2 else ""
@@ -102,18 +148,52 @@ def recording_gh(monkeypatch):
     def _fake_run(argv, *, timeout):
         calls.append(list(argv))
         verb = _verb(argv)
-        if verb == "auth":
-            return SimpleNamespace(returncode=0, stdout="Logged in", stderr="")
+        if verb in ("auth", "delete"):
+            return SimpleNamespace(returncode=0, stdout="Logged in" if verb == "auth" else "", stderr="")
         if verb == "create":
             return SimpleNamespace(
-                returncode=0,
-                stdout="https://gist.github.com/testuser/abc123def456\n",
-                stderr="",
-            )
-        if verb == "delete":
-            return SimpleNamespace(returncode=0, stdout="", stderr="")
+                returncode=0, stdout="https://gist.github.com/testuser/abc123def456\n", stderr="")
+        if verb == "view":
+            if "--files" in argv:
+                return SimpleNamespace(returncode=0, stdout="bundle.jsonl\nbundle.md\n", stderr="")
+            name = argv[argv.index("--filename") + 1]
+            body = {"bundle.jsonl": '{"id":"x","messages":[{"role":"user","content":"hi"}]}\n',
+                    "bundle.md": "# shared\n"}[name]
+            return SimpleNamespace(returncode=0, stdout=body, stderr="")
         return SimpleNamespace(returncode=1, stdout="", stderr="unknown verb")
 
     monkeypatch.setattr(gists, "find_gh", lambda: "/usr/bin/gh")
     monkeypatch.setattr(gists, "_run", _fake_run)
     return SimpleNamespace(calls=calls, verbs=lambda: [_verb(c) for c in calls])
+
+
+@pytest.fixture
+def claude_fixture(tmp_path):
+    path = tmp_path / "claude-session.jsonl"
+    path.write_text("\n".join([
+        json.dumps({"type": "user", "sessionId": "c1", "message": {"role": "user", "content": "fix the build"}}),
+        json.dumps({"type": "assistant", "sessionId": "c1", "message": {"role": "assistant", "content": "done"}}),
+    ]) + "\n", encoding="utf-8")
+    return path
+
+
+@pytest.fixture
+def codex_fixture(tmp_path):
+    path = tmp_path / "rollout-2026-11-06.jsonl"
+    path.write_text("\n".join([
+        json.dumps({"record_type": "state", "payload": {}}),
+        json.dumps({"type": "response_item", "payload": {"role": "user", "content": "hi"}}),
+    ]) + "\n", encoding="utf-8")
+    return path
+
+
+@pytest.fixture
+def hermes_fixture(tmp_path, planted_text):
+    path = tmp_path / "hermes-bundle.jsonl"
+    record = {
+        "id": "exported-0001", "source": "cli", "title": "Exported one", "model": "m",
+        "started_at": 1762400000.0,
+        "messages": [{"role": "user", "content": f"hello\n{planted_text}", "timestamp": 1762400001.0}],
+    }
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    return path

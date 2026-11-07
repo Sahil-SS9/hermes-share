@@ -1,6 +1,6 @@
 name: hermes-share
-version: 0.1.0
-description: "Share the current session as a redacted, revocable secret GitHub gist from /share, and delete it again with /unshare. Disclosure — reads the current session through the same export path /save uses; writes the redacted export and a bounded ledger under the Hermes plugin-data directory; makes exactly two kinds of network call through the gh CLI, `gh gist create` and `gh gist delete`, both only after you confirm; never uploads without /share confirm and never turns redaction off."
+version: 0.2.0
+description: "Share one or several sessions as a redacted, revocable secret GitHub gist from /share, import a shared bundle back with /share import, and delete it again with /unshare. Disclosure — reads the sessions you name through the public `hermes sessions export` CLI, writes the redacted bundle and a bounded ledger under the Hermes plugin-data directory, downloads an import target with gh or plain https, and runs `hermes sessions import` only after /share import confirm; the only network writes are `gh gist create` and `gh gist delete`, both only after you confirm, never with --public, and it holds no token of its own. Redaction cannot be switched off."
 manifest_version: 2
 author: "Sahil-SS9"
 license: MIT
@@ -9,3 +9,11 @@ provides_tools: []
 provides_hooks: []
 requires_env: []
 python_dependencies: []
+config_schema:
+  allow_gateway_import:
+    type: bool
+    default: false
+    description: >-
+      Allow /share import from a chat platform (Discord, Telegram, Slack, ...). An import writes
+      sessions into this Hermes's own store, so it stays off until the owner turns it on. Sharing
+      and /unshare work on chat platforms either way.

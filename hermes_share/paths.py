@@ -35,13 +35,19 @@ def data_dir() -> Path:
         ) from exc
 
 
-def previews_dir() -> Path:
-    path = data_dir() / "previews"
+def _subdir(name: str) -> Path:
+    path = data_dir() / name
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def previews_dir() -> Path:
+    return _subdir("previews")
 
 
 def pending_dir() -> Path:
-    path = data_dir() / "pending"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    return _subdir("pending")
+
+
+def imports_dir() -> Path:
+    return _subdir("imports")

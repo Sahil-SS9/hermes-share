@@ -1,176 +1,148 @@
 # hermes-share
 
-Share the conversation you are in as a redacted, revocable link, without leaving the terminal.
-
-`/share` writes a preview of the current session to your plugin-data directory, shows you the file
-path, its size, how many secrets it removed and the first twenty lines. Nothing leaves the machine
-until you type `/share confirm`, and `/unshare` deletes the gist again.
+Share one or several Hermes sessions as a redacted, revocable link — and import a shared bundle
+back into another Hermes, without a full profile export.
 
 ```
-/share [md|html|jsonl]   write a redacted preview (md is the default)
-/share confirm           upload the preview as a SECRET gist
-/share cancel            delete the preview and forget it
-/share list              gists this profile has shared
-/unshare [id|last]       delete a shared gist and mark it revoked
+/share                        share this session
+/share <id|title> [...]       share the named sessions (up to 12)
+/share --last N               share the N most recent sessions
+/share --format md|jsonl|both which files the gist carries (default: both)
+/share confirm                upload the preview as a SECRET gist
+/share cancel                 delete the preview and forget it
+/share list                   gists this profile has shared
+/share import <gist|file>     read a shared bundle and show what is inside
+/share import confirm         import it into this Hermes
+/unshare [id|last]            delete a shared gist and mark it revoked
 ```
 
-## Why
+Nothing is uploaded until you type the confirm command, and redaction has no off switch.
 
-Hermes already has `/save json|md|html [filename] [redact]`, which writes a local file, and
-`agent/redact.py`, which is the engine behind every credential mask Hermes prints. What it does not
-have is a one-step way to go from "this conversation" to "a link I can paste, that I can revoke".
-`hermes-chat-share` covers the Desktop side by exporting to PNG, HTML, Markdown, JSON or PDF; this
-plugin is the CLI and TUI counterpart and makes exactly one kind of network call, through `gh`.
+## Requirements
 
-## Install
+- **`ctx.redact_text()` in the host.** Redaction goes through the plugin API; there is deliberately
+  no fallback that imports `agent.redact`. On a Hermes without it, `/share` refuses and names the
+  missing seam instead of uploading anything. The core PR for that seam is
+  `feat/plugin-redact-text`; it is not merged at the time of writing, so this plugin is not
+  installable from the catalog yet (see `RELEASE.md`).
+- **`gh`**, signed in (`gh auth login`). The plugin never reads or stores a token.
+- **Hermes-to-Hermes import** additionally needs `hermes sessions import --from hermes`, which is
+  open upstream PR [NousResearch/hermes-agent#87988](https://github.com/NousResearch/hermes-agent/pull/87988).
+  It is feature-detected from `hermes sessions import --help`; without it the Hermes part of an
+  import refuses by name and every other source still works.
 
-```
-hermes plugins install Sahil-SS9/hermes-share
-```
+## What a bundle is
 
-For development, copy the repository into `<hermes home>/plugins/hermes-share/` and add
-`hermes-share` to `plugins.enabled` in `config.yaml`; the plugin loads as a directory plugin.
+Two files in one secret gist:
 
-Requires the [GitHub CLI](https://cli.github.com/) and `gh auth login`. The plugin never reads,
-stores or takes a token: authentication is whatever `gh` already has for your account.
+| File | Purpose |
+| --- | --- |
+| `hermes-sessions-<stamp>.jsonl` | the importable record, one session per line, exactly the shape `hermes sessions export` writes |
+| `hermes-sessions-<stamp>.md` | the readable transcript |
 
-## What a preview looks like
+`--format md` or `--format jsonl` ships just one of them.
 
-This is real output from a throwaway Hermes home with a session containing planted credentials:
+## What is redacted
+
+Every string in every message goes through the host's strongest scrubber, then two more passes:
+
+1. **Credentials** become non-reusable sentinels — `«redacted:sk-…»`, `«redacted:ghp_…»`,
+   `«redacted-secret»`, `Bearer ***`. Not the head/tail mask a terminal can afford: ten readable
+   characters of a key are fine on your own screen and not fine in a document that leaves the
+   machine.
+2. **Home paths** — `/home/<user>` and `/Users/<user>` become `~`.
+3. **Identity** — your account name and host names become `<redacted>`.
+
+The gist description is redacted with the same passes, and the preview reports how many of each.
+
+## Preview
 
 ```
 /share - preview ready, nothing uploaded
 
-  file       <hermes home>/plugin-data/hermes-share/previews/hermes_session_6bd32f79614dfd51.md
-  format     md
-  size       998 B, 44 lines
-  redacted   12 secret mark(s), 3 home path(s), 3 account/host name(s)
-  gist desc  Hermes session: untitled session 6bd32f79614dfd51 (06/11/2026)
+  sessions   2
+  share-a-0001              4 msg    6 secret mark(s)  Deploy notes
+  share-b-0002              2 msg    3 secret mark(s)  Second session
 
-  --- first 20 lines ---
-# Session: share-live-01
-- Session ID: `share-live-01`
-- Source: `cli`
-- Model: `live-test-model`
-
-## User - 2026-11-06T13:06:56Z
-
-here are my deploy notes
-OPENAI key «redacted:sk-…»
-CI token «redacted:ghp_…»
-header Authorization: Bearer ***
-DB_PASSWORD=«redacted-secret»
-checked out at ~/work/private-repo/app.py and I am <redacted>
-  ... (24 more lines)
-  --- end ---
+  redacted   9 secret mark(s), 2 home path(s), 2 account/host name(s)
+  files      hermes-sessions-20261107-011530.jsonl, hermes-sessions-20261107-011530.md (4.1 KB total)
+  gist desc  Hermes sessions: Deploy notes, Second session (2)
 
 Next: /share confirm   uploads it as a SECRET gist (unlisted, not private)
       /share cancel    deletes the preview and forgets it
 ```
 
-After `/share confirm`:
+## Import
 
 ```
-Shared as a secret gist:
-  https://gist.github.com/<you>/<id>
-
-  998 B, format md, hermes_session_6bd32f79614dfd51.md
-  Secret means unlisted and searchable only by URL - it is not access-controlled.
-
-Revoke with: /unshare last
+/share import https://gist.github.com/<you>/<id>
+/share import ~/handover.jsonl
 ```
 
-`/unshare last`:
+The format is decided from the file's content, never from its name or the URL:
 
-```
-Deleted gist <id>. The URL now returns 404.
-  Revoked at 2026-11-06T13:12:33Z
-```
+| Content | Route |
+| --- | --- |
+| Hermes jsonl export (`id` + `messages` per line) | `hermes sessions import --from hermes` |
+| Claude Code JSONL transcript | `hermes sessions import --from claude` |
+| Codex rollout | `hermes sessions import --from codex` |
 
-## What it redacts
-
-Three passes, each counted in the preview, with no way to switch any of them off:
-
-1. Every message body, tool-call argument and segment goes through
-   `agent.redact.redact_sensitive_text` in its strongest mode. Credentials become non-reusable
-   sentinels such as `«redacted:sk-…»` rather than the `sk-pro...z2Xc` head/tail mask a terminal
-   prints: ten readable characters of a key are fine on your own screen and not fine in a document
-   that leaves the machine.
-2. The whole rendered document is passed through the force-mode pass again, which also covers the
-   metadata the message pass does not touch (title, model, timings).
-3. `/home/<user>` and `/Users/<user>` are rewritten to `~`, and your account name and host names
-   are replaced with `<redacted>`.
-
-Redaction is applied to the gist description as well as the body.
-
-## Disclosure
-
-- **Reads:** the current session, through the same export functions `/save` uses
-  (`hermes_cli.session_export.load_save_snapshot` / `render_session_for_save`), read-only.
-- **Writes:** the redacted export and a bounded ledger under
-  `<hermes home>/plugin-data/hermes-share/`. The ledger keeps the last 50 shares (gist id, url,
-  session hash, format, timestamps, status) and never stores the session id itself. Previews are
-  capped at 20 files and pending previews expire after 15 minutes.
-- **Network:** exactly two calls, both through the `gh` CLI and both only after you confirm:
-  `gh gist create` and `gh gist delete`. `--public` is never passed and a test asserts it.
-- **Never:** uploads without `/share confirm`, turns redaction off, reads or stores a GitHub token,
-  or runs any other subprocess. The preview itself starts no child process at all — the `gh auth
-  status` check happens on `confirm`, not on `share`.
-- **Child environment:** `gh` is given an allowlist (`HOME`, `PATH`, `GH_CONFIG_DIR`, `GH_HOST`,
-  `XDG_CONFIG_HOME`, locale, `SHELL`, `TMPDIR`), never the session's whole environment, which holds
-  every provider key on the machine.
+A gist carries the jsonl and the markdown; only the file that parses as session records is offered,
+so the readable copy can never be imported as a transcript. Downloads are capped at 8 MB, use `gh`
+for gists (a secret gist is not a public URL) and plain HTTPS otherwise, and nothing is executed.
 
 ## Surfaces
 
-| Surface | Behaviour |
-| --- | --- |
-| classic CLI (`hermes`) | supported, preview + confirm |
-| TUI (`hermes --tui`) | supported, same output |
-| Desktop | supported through the same command dispatch |
-| messaging platforms | refused with a message pointing at `/save` |
+| Surface | Share / unshare | Import |
+| --- | --- | --- |
+| classic CLI (`hermes`) | full preview, then confirm | allowed |
+| TUI (`hermes --tui`) | same output as the CLI | allowed |
+| Desktop | same command dispatch | allowed |
+| chat platforms (Discord, Telegram, Slack, …) | short preview in chat (counts and titles, never the bundle text), same confirm command, gist URL posted back | off by default: an import writes into this Hermes's store, so it needs `allow_gateway_import: true` |
 
-Messaging platforms are refused deliberately rather than half-implemented: the preview has to be
-read somewhere you can also open the file, and a chat reply cannot carry twenty lines plus a
-confirm round trip without putting the document into the chat history. Gateway support is a
-follow-up.
-
-## Desktop
-
-If you want to share a Desktop conversation as a long screenshot, self-contained HTML, Markdown,
-JSON or PDF, use [`hermes-chat-share`](https://github.com/smallmj/hermes-chat-share) from the Hermes
-catalog. It is a Desktop UI plugin and makes no network calls. This plugin does not duplicate it.
-
-## Compatibility
-
-The plugin targets upstream `hermes-agent` at `90d6b98fd86d20981ee06ddd5b7d93e4320f26a4` and uses
-three host modules that are not part of the documented plugin API:
-
-```
-agent.redact.redact_sensitive_text
-hermes_cli.session_export.load_save_snapshot
-hermes_cli.session_export.render_session_for_save
+```yaml
+plugins:
+  entries:
+    hermes-share:
+      settings:
+        allow_gateway_import: true   # default false
 ```
 
-`hermes plugins validate` reports these as private core imports (a catalog rule 9 warning, not a
-failure). There is no public plugin seam for exporting the current session, so reusing `/save`'s
-own functions is the smallest honest option: it means a shared session is byte-for-byte the
-document `/save` would have written, redacted. If any of those signatures change, the plugin needs
-updating with the host.
+## Disclosure
+
+- **Reads:** the sessions you name, through the public `hermes sessions export` CLI. The session
+  index (ids, titles, recency) is read through `hermes_state`, which is on the published plugin API
+  list.
+- **Writes:** the bundle and a 50-row ledger under `<hermes home>/plugin-data/hermes-share/`.
+  Ledger rows hold the gist id, url, session ids/titles/counts, file names and timestamps. Previews
+  and import downloads are capped at 20 files each; a pending preview expires after 15 minutes.
+- **Network:** `gh gist create` and `gh gist delete` only after you confirm, never with `--public`;
+  `gh gist view` to read a gist you import; plain HTTPS for a public raw URL.
+- **Never:** uploads before confirm, turns redaction off, reads or stores a GitHub token, imports
+  without `/share import confirm`, or executes anything it downloads.
+- **Child processes:** `gh` gets an allowlist (`HOME`, `PATH`, `GH_CONFIG_DIR`, locale, `SHELL`,
+  `TMPDIR`), and the `hermes` child gets the same kind of allowlist plus `HERMES_HOME` — never the
+  session's whole environment, which holds every provider key on the machine.
+
+## Desktop alternative
+
+For a Desktop session as a long screenshot, HTML, Markdown or PDF with per-turn selection, use
+[`hermes-chat-share`](https://github.com/smallmj/hermes-chat-share) from the catalog. It makes no
+network calls. This plugin does not duplicate it.
 
 ## Tests
 
 ```
 uv venv --python 3.14
 uv pip install --python .venv/bin/python pytest "ruamel.yaml>=0.18"
-HERMES_HOME=/tmp/unused PYTHONPATH=/path/to/hermes-agent-checkout \
-  .venv/bin/python -m pytest -q
+HERMES_TEST_HOST_BIN=/path/to/hermes/.venv/bin/hermes \
+PYTHONPATH=/path/to/hermes-agent-checkout .venv/bin/python -m pytest -q
 ```
 
-Fifty-five tests. They run against a temporary `HOME` and `HERMES_HOME` with a real `SessionDB`,
-and cover: planted credentials, bearer headers and `.env` lines never reaching the document or the
-gist description; the confirm gate (no child process before `confirm`); a bounded ledger; `/unshare
-last`; `gh` missing and `gh` not signed in; the `--public` and `--yes` argument shapes; preview TTL;
-and the surface allowlist.
+62 tests against a temporary `HOME`/`HERMES_HOME` and a real `SessionDB`: bundle parsing, sentinel
+masking, home and identity scrubbing, content detection for all three formats, the confirm gate (no
+child process before it), the `#87988` refusal, the gateway consent gate, ledger bounds, TTLs,
+`/unshare`, and one end-to-end export through the real CLI binary.
 
 ## Licence
 
