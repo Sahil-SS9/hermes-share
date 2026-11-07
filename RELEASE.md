@@ -4,8 +4,15 @@
 
 `plugin.yaml` requires `ctx.redact_text()`, which is not on upstream `main`. The catalog entry is
 drafted and deliberately **not** submitted: `RELEASE.md` and the entry's `known_issues` say so, and
-`plugin_validate_private_imports` would in any case reject nothing here — the plugin has no private
-imports, it has a missing *public* one.
+`plugin_validate_private_imports` has nothing to report here — the plugin has no private imports, it
+has a missing *public* one.
+
+Drafted entry: `plugin-catalog/hermes-share.yaml`, pinned to
+`7da00a2f8cc38f685260a6eff61cb68532c99b3c` — a LOCAL commit that is not pushed anywhere, so the pin
+is not fetchable yet. Structural check against the host's own validator:
+`scripts/validate_plugin_catalog.py plugin-catalog/hermes-share.yaml` → `OK: 1 file(s) valid`
+(category must be one of desktop/memory/platform/web/tools/voice/automation/models/general;
+`tools` is the fit).
 
 Order of work before a submission:
 
