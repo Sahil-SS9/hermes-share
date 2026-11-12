@@ -30,18 +30,35 @@ def _capped(name: str, data: bytes) -> tuple[str, str]:
     return name, data.decode("utf-8", errors="replace")
 
 
+class _HttpsOnlyRedirects(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect only to another https URL, so a download never drops to plain http."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001 - stdlib signature
+        if not str(newurl).lower().startswith("https://"):
+            raise ImportFailed(f"refusing a redirect to {newurl}: imports download over https only")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _open(request: urllib.request.Request):  # noqa: ANN202 - an http.client response
+    return urllib.request.build_opener(_HttpsOnlyRedirects()).open(request, timeout=30)
+
+
 def fetch(target: str) -> list[tuple[str, str]]:
     """(name, text) for each file behind a gist URL (via gh: a secret gist is not public), an
-    http(s) URL, or a local path."""
+    https URL, or a local path."""
     gist_id = gists.gist_id_from_url(target)
     if gist_id:
         gists.require_auth()
         return [_capped(name, text.encode("utf-8")) for name, text in gists.read_gist(gist_id)]
-    if target.lower().startswith(("https://", "http://")):
+    if target.lower().startswith("http://"):
+        raise ImportFailed(f"refusing {target}: imports download over https only")
+    if target.lower().startswith("https://"):
         request = urllib.request.Request(target, headers={"User-Agent": "hermes-share"})
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
+            with _open(request) as response:
                 data = response.read(MAX_DOWNLOAD_BYTES + 1)
+        except ImportFailed:
+            raise
         except (urllib.error.URLError, OSError, ValueError) as exc:
             raise ImportFailed(f"could not download {target} ({exc})") from exc
         return [_capped(target.rstrip("/").rsplit("/", 1)[-1] or "download", data)]

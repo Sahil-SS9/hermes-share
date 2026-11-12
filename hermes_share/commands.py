@@ -18,6 +18,10 @@ from . import PLUGIN_NAME, bundle, gists, hostcli, importing, store
 LOCAL_SURFACES = frozenset({"local", "cli", "tui", "desktop", "acp", ""})
 #: Setting that lets a chat platform import a bundle into this profile's store.
 GATEWAY_IMPORT_SETTING = "allow_gateway_import"
+#: Setting that lets a chat platform name other sessions (selectors, ``--last``) and list or delete
+#: gists it did not create. Off by default: on a gateway the session store holds every platform's and
+#: every user's sessions, and the gist account is the owner's.
+GATEWAY_SELECTORS_SETTING = "allow_gateway_selectors"
 FORMATS = {
     "jsonl": {"jsonl"},
     "md": {"md"},
@@ -81,6 +85,18 @@ def _now() -> str:
     return _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _owner_scope(rt: Runtime, platform: str) -> bool:
+    """True where the caller may act on the whole profile: a local surface, or the owner allowed it."""
+    return platform in LOCAL_SURFACES or rt.setting(GATEWAY_SELECTORS_SETTING, False) is True
+
+
+def _visible(rows: list[dict[str, Any]], rt: Runtime, platform: str, key: str) -> list[dict[str, Any]]:
+    """Ledger rows this caller may see and delete: all of them locally, else only this chat's own."""
+    if _owner_scope(rt, platform):
+        return rows
+    return [r for r in rows if key and r.get("session_key") == key]
+
+
 def _size(paths: list[Path]) -> str:
     n = sum(p.stat().st_size for p in paths if p.is_file())
     return f"{n} B" if n < 1024 else f"{n / 1024:.1f} KB" if n < 2**20 else f"{n / 2**20:.1f} MB"
@@ -118,7 +134,14 @@ def _parse(raw: str) -> dict[str, Any]:
 # ---------------------------------------------------------------- sharing
 
 
-def _share_preview(rt: Runtime, key: str, session_id: str, parsed: dict[str, Any]) -> str:
+def _share_preview(rt: Runtime, key: str, session_id: str, parsed: dict[str, Any], platform: str) -> str:
+    if (parsed["selectors"] or parsed["last"]) and not _owner_scope(rt, platform):
+        raise Refused(
+            f"On {platform}, /share shares only this conversation: naming other sessions or using --last "
+            "would read every platform's and every user's sessions in this profile.\n"
+            f"  The owner can allow it with plugins.entries.{PLUGIN_NAME}.settings."
+            f"{GATEWAY_SELECTORS_SETTING}: true. Plain /share works here without it."
+        )
     redact = rt.redactor()
     ids = (
         hostcli.session_ids(parsed["selectors"], parsed["last"])
@@ -183,6 +206,9 @@ def _share_confirm(rt: Runtime, key: str, platform: str) -> str:
             "format": ",".join(pending["formats"]),
             "created": _now(),
             "status": "shared",
+            # Who may delete it from a chat: the conversation that created it (see _visible).
+            "session_key": key,
+            "platform": platform or "local",
         }
     )
     store.clear_pending(key)
@@ -196,7 +222,7 @@ def _share_confirm(rt: Runtime, key: str, platform: str) -> str:
             "  Secret means unlisted and readable by anyone with the URL - it is not access-controlled.",
             "",
             "Import it in another Hermes with: /share import <url>",
-            *(["Revoke with:                     /unshare last"] if platform in LOCAL_SURFACES else []),
+            "Revoke with:                     /unshare last",
         ]
     )
 
@@ -273,11 +299,16 @@ def _import_confirm(rt: Runtime, key: str, platform: str) -> str:
 # ---------------------------------------------------------------- list / cancel / unshare
 
 
-def _list() -> str:
-    rows = store.shares()
+def _list(rt: Runtime, platform: str, key: str) -> str:
+    whole = _owner_scope(rt, platform)
+    rows = _visible(store.shares(), rt, platform, key)
     if not rows:
-        return "No gists have been shared from this profile yet."
-    out = [f"Shared gists for this profile ({len(rows)}):", ""]
+        return (
+            "No gists have been shared from this profile yet."
+            if whole
+            else "No gists have been shared from this conversation."
+        )
+    out = [f"Shared gists for this {'profile' if whole else 'conversation'} ({len(rows)}):", ""]
     for r in rows:
         out += [
             f"  {r.get('status', 'shared'):<7}  {r.get('created', '?')}  "
@@ -301,8 +332,8 @@ def _cancel(key: str) -> str:
     )
 
 
-def _unshare(target: str) -> str:
-    rows = store.shares()
+def _unshare(target: str, rt: Runtime, platform: str, key: str) -> str:
+    rows = _visible(store.shares(), rt, platform, key)
     if target in ("", "last"):
         row = next((r for r in rows if r.get("status") == "shared"), None)
         if row is None:
@@ -311,6 +342,12 @@ def _unshare(target: str) -> str:
         gist_id = gists.gist_id_from_url(target) or target
         row = next((r for r in rows if r.get("gist_id") == gist_id), None)
         if row is None:
+            if any(r.get("gist_id") == gist_id for r in store.shares()):
+                return (
+                    f"{gist_id} is not one this chat shared, so it was not deleted. The owner can remove it "
+                    f"from a local session, or allow it here with plugins.entries.{PLUGIN_NAME}.settings."
+                    f"{GATEWAY_SELECTORS_SETTING}: true."
+                )
             return f"{gist_id} is not in this profile's ledger; nothing was deleted (see /share list)."
         if row.get("status") == "revoked":
             return f"{gist_id} is already revoked; nothing to do."
@@ -361,16 +398,25 @@ def handle_share(
             )
         return {
             "help": lambda: USAGE,
-            "list": _list,
+            "list": lambda: _list(rt, platform, key),
             "cancel": lambda: _cancel(key),
             "confirm": lambda: _share_confirm(rt, key, platform),
-        }.get(sub, lambda: _share_preview(rt, key, session_id, parsed))()
+        }.get(sub, lambda: _share_preview(rt, key, session_id, parsed, platform))()
 
     return _guard(run, "share")
 
 
-def handle_unshare(raw_args: str = "", **_kwargs: Any) -> str:
+def handle_unshare(
+    raw_args: str = "",
+    *,
+    rt: Runtime,
+    session_id: str = "",
+    session_key: str = "",
+    platform: str = "",
+    **_kwargs: Any,
+) -> str:
     tokens = (raw_args or "").split()
     if len(tokens) > 1 or tokens[:1] in (["help"], ["-h"], ["--help"]):
         return USAGE
-    return _guard(lambda: _unshare(tokens[0] if tokens else ""), "unshare")
+    key = session_key or session_id or ""
+    return _guard(lambda: _unshare(tokens[0] if tokens else "", rt, platform, key), "unshare")

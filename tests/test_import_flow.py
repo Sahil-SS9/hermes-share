@@ -159,7 +159,7 @@ def test_download_size_cap_is_enforced(fake_home, monkeypatch):
         def __call__(self, *a, **k):
             return _Huge._Resp()
 
-    monkeypatch.setattr(importing.urllib.request, "urlopen", _Huge())
+    monkeypatch.setattr(importing, "_open", _Huge())
     with pytest.raises(importing.ImportFailed) as excinfo:
         importing.fetch("https://example.invalid/big.jsonl")
     assert "cap" in str(excinfo.value)

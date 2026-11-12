@@ -93,7 +93,7 @@ The format is decided from the file's content, never from its name or the URL:
 
 A gist carries the jsonl and the markdown; only the file that parses as session records is offered,
 so the readable copy can never be imported as a transcript. Downloads are capped at 8 MB, use `gh`
-for gists (a secret gist is not a public URL) and plain HTTPS otherwise, and nothing is executed.
+for gists (a secret gist is not a public URL) and HTTPS only otherwise (an `http://` URL or a redirect to one is refused), and nothing is executed.
 
 ## Surfaces
 
@@ -102,14 +102,20 @@ for gists (a secret gist is not a public URL) and plain HTTPS otherwise, and not
 | classic CLI (`hermes`) | full preview, then confirm | allowed |
 | TUI (`hermes --tui`) | same output as the CLI | allowed |
 | Desktop | same command dispatch | allowed |
-| chat platforms (Discord, Telegram, Slack, …) | short preview in chat (counts and titles, never the bundle text), same confirm command, gist URL posted back | off by default: an import writes into this Hermes's store, so it needs `allow_gateway_import: true` |
+| chat platforms (Discord, Telegram, Slack, …) | short preview in chat (counts and titles, never the bundle text), same confirm command, gist URL posted back. Only the calling conversation is shared, and `/share list` and `/unshare` see only the gists that conversation created, unless `allow_gateway_selectors: true` | off by default: an import writes into this Hermes's store, so it needs `allow_gateway_import: true` |
+
+On a gateway, the profile's session store holds every platform's and every user's sessions, and the
+gists go to the owner's GitHub account. So by default a chat can share only its own conversation (no
+`<id|title>` selectors, no `--last N`), and can list or delete only gists it created (each ledger row
+records the creating conversation). The owner can lift both limits:
 
 ```yaml
 plugins:
   entries:
     hermes-share:
       settings:
-        allow_gateway_import: true   # default false
+        allow_gateway_import: true      # default false
+        allow_gateway_selectors: true   # default false
 ```
 
 ## Disclosure
@@ -118,10 +124,11 @@ plugins:
   index (ids, titles, recency) is read through `hermes_state`, which is on the published plugin API
   list.
 - **Writes:** the bundle and a 50-row ledger under `<hermes home>/plugin-data/hermes-share/`.
-  Ledger rows hold the gist id, url, session ids/titles/counts, file names and timestamps. Previews
+  Ledger rows hold the gist id, url, session ids/titles/counts, file names, timestamps and the
+  creating conversation's session key and platform. Previews
   and import downloads are capped at 20 files each; a pending preview expires after 15 minutes.
 - **Network:** `gh gist create` and `gh gist delete` only after you confirm, never with `--public`;
-  `gh gist view` to read a gist you import; plain HTTPS for a public raw URL.
+  `gh gist view` to read a gist you import; HTTPS only (redirects included) for a public raw URL.
 - **Never:** uploads before confirm, turns redaction off, reads or stores a GitHub token, imports
   without `/share import confirm`, or executes anything it downloads.
 - **Child processes:** `gh` gets an allowlist (`HOME`, `PATH`, `GH_CONFIG_DIR`, locale, `SHELL`,

@@ -18,7 +18,7 @@ def register(ctx) -> None:
     )
     ctx.register_command(
         "unshare",
-        handler=handle_unshare,
+        handler=partial(handle_unshare, rt=runtime),
         description="Delete a shared session gist (/unshare last for the newest)",
         args_hint="[gist-id|last]",
     )

@@ -167,8 +167,10 @@ def recording_gh(monkeypatch):
         if verb in ("auth", "delete"):
             return SimpleNamespace(returncode=0, stdout="Logged in" if verb == "auth" else "", stderr="")
         if verb == "create":
+            # Each upload gets its own id, as on GitHub: abc123def456, then abc123def457, ...
+            n = sum(1 for c in calls if _verb(c) == "create") - 1
             return SimpleNamespace(
-                returncode=0, stdout="https://gist.github.com/testuser/abc123def456\n", stderr=""
+                returncode=0, stdout=f"https://gist.github.com/testuser/abc123def{456 + n}\n", stderr=""
             )
         if verb == "view":
             if "--files" in argv:
