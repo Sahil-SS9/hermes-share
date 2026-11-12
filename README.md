@@ -105,7 +105,7 @@ for gists (a secret gist is not a public URL) and HTTPS only otherwise (an `http
 | chat platforms (Discord, Telegram, Slack, …) | short preview in chat (counts and titles, never the bundle text), same confirm command, gist URL posted back. Only the calling conversation is shared, and `/share list` and `/unshare` see only the gists that conversation created, unless `allow_gateway_selectors: true` | off by default: an import writes into this Hermes's store, so it needs `allow_gateway_import: true` |
 
 On a gateway, the profile's session store holds every platform's and every user's sessions, and the
-gists go to the owner's GitHub account. So by default a chat can share only its own conversation (no
+gists go to the owner's GitHub account. So by default a chat can only /share the session it is in (no
 `<id|title>` selectors, no `--last N`), and can list or delete only gists it created (each ledger row
 records the creating conversation). The owner can lift both limits:
 

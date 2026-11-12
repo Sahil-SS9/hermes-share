@@ -137,7 +137,7 @@ def _parse(raw: str) -> dict[str, Any]:
 def _share_preview(rt: Runtime, key: str, session_id: str, parsed: dict[str, Any], platform: str) -> str:
     if (parsed["selectors"] or parsed["last"]) and not _owner_scope(rt, platform):
         raise Refused(
-            f"On {platform}, /share shares only this conversation: naming other sessions or using --last "
+            f"On {platform}, /share covers only the current session: naming other sessions or using --last "
             "would read every platform's and every user's sessions in this profile.\n"
             f"  The owner can allow it with plugins.entries.{PLUGIN_NAME}.settings."
             f"{GATEWAY_SELECTORS_SETTING}: true. Plain /share works here without it."
